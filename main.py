@@ -36,6 +36,7 @@ from actions.game_updater      import game_updater
 from actions.history_researcher import history_research_action
 from actions.obsidian_bridge   import set_vault_path, analyze_research_landscape, get_vault_path
 from actions.hand_gesture      import hand_gesture_control
+from actions.voice_enrollment  import enroll_voice as _enroll_voice_fn
 from core.claude_client        import is_claude_available as _check_claude
 
 
@@ -585,6 +586,25 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "enroll_voice",
+        "description": (
+            "사용자 목소리를 학습하여 웨이크워드 화자 인증 프로필을 저장합니다. "
+            "등록 완료 후 원준씨 목소리에만 웨이크워드('Wake up Wonjuns', '원준아 일어나' 등)가 반응합니다. "
+            "'내 목소리 등록해줘', '목소리 학습해줘', '목소리 등록', '화자 인증 설정', "
+            "'내 목소리만 인식해줘', '목소리 프로필 만들어줘' 등의 발화에 즉시 호출하세요."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "n_samples": {
+                    "type": "INTEGER",
+                    "description": "녹음할 샘플 수 (기본값: 5, 최소 3, 최대 10)"
+                }
+            },
+            "required": []
+        }
+    },
+    {
         "name": "save_memory",
         "description": (
             "Save an important personal fact about the user to long-term memory. "
@@ -661,14 +681,72 @@ class WakeWordDetector:
     ]
 
     def __init__(self, sample_rate: int = 16000, on_wake=None):
-        self._rate     = sample_rate
-        self._on_wake  = on_wake
+        self._rate              = sample_rate
+        self._on_wake           = on_wake
         self._q: _queue.Queue[bytes] = _queue.Queue(maxsize=500)
-        self._active   = True
-        self._cooldown = 0.0
+        self._active            = True
+        self._cooldown          = 0.0
+        self._voice_profile     = None   # np.ndarray or None
+        self._encoder           = None   # resemblyzer VoiceEncoder (lazy)
+        self._verify_threshold  = 0.80
+        self._load_voice_profile()
         threading.Thread(
             target=self._loop, daemon=True, name="wake-detector"
         ).start()
+
+    def _load_voice_profile(self):
+        """config/voice_profile.npy 로드 (없으면 None 유지)."""
+        try:
+            from actions.voice_enrollment import load_voice_profile
+            self._voice_profile = load_voice_profile()
+            if self._voice_profile is not None:
+                print("[WONJUNS] 🔐 목소리 프로필 로드 완료 — 화자 인증 활성화")
+            else:
+                print("[WONJUNS] ℹ️  목소리 프로필 없음 — 모든 목소리 허용")
+        except Exception as e:
+            print(f"[WONJUNS] ⚠️  프로필 로드 실패: {e}")
+            self._voice_profile = None
+
+    def reload_profile(self):
+        """목소리 등록 완료 후 새 프로필을 다시 읽어들입니다."""
+        self._encoder = None  # 인코더 캐시 초기화
+        self._load_voice_profile()
+
+    def _get_encoder(self):
+        """resemblyzer VoiceEncoder 지연 로딩 및 캐싱."""
+        if self._encoder is None:
+            try:
+                from resemblyzer import VoiceEncoder
+                self._encoder = VoiceEncoder()
+            except ImportError:
+                pass  # resemblyzer 미설치 시 검증 건너뜀
+        return self._encoder
+
+    def _verify_speaker(self, audio_bytes: bytes) -> bool:
+        """
+        프로필이 없으면 True(무조건 통과),
+        프로필이 있으면 코사인 유사도 ≥ threshold 여부 반환.
+        """
+        if self._voice_profile is None:
+            return True
+        encoder = self._get_encoder()
+        if encoder is None:
+            return True  # resemblyzer 미설치 — 검증 건너뜀
+        try:
+            from actions.voice_enrollment import verify_speaker
+            passed, score = verify_speaker(
+                audio_bytes, self._rate,
+                threshold=self._verify_threshold,
+                encoder=encoder,
+            )
+            if passed:
+                print(f"[WONJUNS] 🔐 화자 인증 통과 (유사도: {score:.2f})")
+            else:
+                print(f"[WONJUNS] 🔐 화자 인증 실패 — 다른 목소리 (유사도: {score:.2f})")
+            return passed
+        except Exception as e:
+            print(f"[WONJUNS] ⚠️  화자 검증 오류: {e} — 통과 처리")
+            return True
 
     def feed(self, pcm_bytes: bytes):
         try:
@@ -720,29 +798,39 @@ class WakeWordDetector:
                 continue
 
             audio = sr.AudioData(acc[-WINDOW:], self._rate, 2)
+            phrase_detected = False
+            detected_text   = ""
 
             # ① 영어 인식 시도
             try:
                 en_text = rec.recognize_google(audio, language="en-US").lower()
                 if any(p in en_text for p in self._EN_PHRASES):
+                    phrase_detected = True
+                    detected_text   = en_text
                     print(f"[WONJUNS] 🎤 영어 웨이크워드 감지: '{en_text}'")
-                    self._cooldown = now + 4.0
-                    if self._on_wake:
-                        self._on_wake()
-                    continue
             except Exception:
                 pass
 
-            # ② 한국어 인식 시도
-            try:
-                ko_text = rec.recognize_google(audio, language="ko-KR").lower()
-                if any(p in ko_text for p in self._KO_PHRASES):
-                    print(f"[WONJUNS] 🎤 한국어 웨이크워드 감지: '{ko_text}'")
+            # ② 한국어 인식 시도 (영어 미감지 시)
+            if not phrase_detected:
+                try:
+                    ko_text = rec.recognize_google(audio, language="ko-KR").lower()
+                    if any(p in ko_text for p in self._KO_PHRASES):
+                        phrase_detected = True
+                        detected_text   = ko_text
+                        print(f"[WONJUNS] 🎤 한국어 웨이크워드 감지: '{ko_text}'")
+                except Exception:
+                    pass   # 무음·인식 실패 — 조용히 무시
+
+            if phrase_detected:
+                # ③ 화자 인증 — 등록된 프로필이 있을 때만 검사
+                if self._verify_speaker(acc[-WINDOW:]):
                     self._cooldown = now + 4.0
                     if self._on_wake:
                         self._on_wake()
-            except Exception:
-                pass   # 무음·인식 실패 — 조용히 무시
+                else:
+                    print("[WONJUNS] 🔐 웨이크워드 무시 — 등록된 목소리가 아님")
+                    self._cooldown = now + 1.0  # 짧은 쿨다운
 
 
 # --- Plugin system ---
@@ -1047,6 +1135,24 @@ class JarvisLive:
                     lambda: hand_gesture_control(action, args, player=ui_ref, speak_fn=speak_fn)
                 )
                 result = r or "완료."
+
+            elif name == "enroll_voice":
+                n_samples = int(args.get("n_samples", 5))
+                self.ui.write_log(f"SYS: 목소리 등록 시작 — {n_samples}개 샘플")
+                ui_ref   = self.ui
+                speak_fn = self.speak
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: _enroll_voice_fn(
+                        n_samples=n_samples,
+                        player=ui_ref,
+                        speak_fn=speak_fn,
+                    )
+                )
+                result = r or "목소리 등록이 완료되었습니다."
+                # 웨이크워드 감지기에 새 프로필 즉시 반영
+                if self._wake_detector:
+                    self._wake_detector.reload_profile()
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
