@@ -1,40 +1,62 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# UNFAT 코어 의존성 — Python 3.11+ 호환, Python 3.14 완전 지원
+#
+# 설치 방법:
+#   빠른 설치:  bash install.sh
+#   수동 설치:  pip install -r requirements.txt
+#              pip install -r requirements-optional.txt  (선택적 기능)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 음성 인식 ─────────────────────────────────────────────────────────────────
 sounddevice
 SpeechRecognition
+
+# ── Google AI ─────────────────────────────────────────────────────────────────
 google-genai
 google-generativeai
+
+# ── 이미지·네트워크 기본 ──────────────────────────────────────────────────────
 pillow
 requests
 beautifulsoup4
 duckduckgo-search
 playwright
-pyautogui
+
+# ── 클립보드·화면 캡처 ───────────────────────────────────────────────────────
 pyperclip
-pygetwindow
+mss
+
+# ── 컴퓨터 비전 ──────────────────────────────────────────────────────────────
 opencv-python
 mediapipe
 numpy
-mss
+
+# ── 시스템 유틸리티 ───────────────────────────────────────────────────────────
 psutil
 send2trash
+
+# ── 미디어·오피스 ─────────────────────────────────────────────────────────────
 youtube-transcript-api
 python-pptx
+
+# ── 웹 서버 ──────────────────────────────────────────────────────────────────
 fastapi
 uvicorn[standard]
 cryptography
 python-multipart
+
+# ── QR 코드 ──────────────────────────────────────────────────────────────────
+qrcode[pil]
+
+# ── Windows 전용 ──────────────────────────────────────────────────────────────
 comtypes; sys_platform == "win32"
 pycaw; sys_platform == "win32"
 win10toast; sys_platform == "win32"
 pywinauto; sys_platform == "win32"
-qrcode[pil]
 
 # ── 멀티 AI 연동 ─────────────────────────────────────────────────────────────
 # Claude AI (Anthropic) — 논문 심층 분석, 각주, 연구사 정리
 anthropic
-
-# ── 화자 인증 ─────────────────────────────────────────────────────────────────
-# 목소리 프로필 등록 및 웨이크워드 화자 검증 (resemblyzer d-vector)
-resemblyzer
 
 # ── 역사학 연구 특화 의존성 ──────────────────────────────────────────────────
 # PDF 페이지별 텍스트 추출 (각주 페이지 번호 지원)
@@ -43,13 +65,15 @@ pdfplumber
 # 워드 파일 텍스트 추출
 python-docx
 
-# 한국어·영어 OCR (스캔 이미지, 스캔 PDF)
+# 한국어·영어·한자 OCR (스캔 이미지, 스캔 PDF, 한자 병용 문헌)
 easyocr
 
-# HWP(한글) 파일 텍스트 추출
-# hwp5 패키지 설치: pip install pyhwp (선택사항, 없으면 LibreOffice 변환 사용)
-# pyhwp
-
-# 이미지 처리 (easyocr 내부 사용)
+# 딥러닝 프레임워크 (easyocr, resemblyzer 공통 사용)
+# Python 3.14: cp314 wheel 제공됨 (torch 2.7+)
 torch
 torchvision
+
+# ── 선택적 패키지 안내 ────────────────────────────────────────────────────────
+# 아래 패키지들은 Python 3.14 바이너리 wheel 미제공으로 별도 설치가 필요합니다:
+#   bash install.sh        → 자동 처리 (권장)
+#   또는 requirements-optional.txt 참조

@@ -23,6 +23,34 @@ SAMPLE_RATE        = 16000
 RECORD_SECONDS     = 3
 
 
+# ── webrtcvad 호환성 스텁 ────────────────────────────────────────────────────
+# Python 3.14 등 신버전에서 webrtcvad C 익스텐션을 빌드할 수 없을 때
+# 스텁을 sys.modules에 주입하여 resemblyzer가 임포트 오류 없이 동작하게 합니다.
+# VAD(음성 활동 감지)가 항상 True를 반환하므로 무음 구간 필터링만 비활성화됩니다.
+
+def _inject_webrtcvad_stub_if_needed():
+    import sys
+    try:
+        import webrtcvad  # noqa: F401 — 실제 패키지 있으면 그대로 사용
+    except (ImportError, OSError):
+        import types
+
+        class _Vad:
+            def __init__(self, aggressiveness: int = 1):
+                self._aggressiveness = aggressiveness
+            def is_speech(self, buf, sample_rate, frame_length=None) -> bool:
+                return True  # VAD 비활성화 — 모든 프레임을 음성으로 처리
+            def set_mode(self, aggressiveness: int) -> None:
+                self._aggressiveness = aggressiveness
+
+        stub = types.ModuleType("webrtcvad")
+        stub.Vad = _Vad
+        sys.modules["webrtcvad"] = stub
+        print("[VoiceEnroll] webrtcvad 스텁 모드 활성화 (Python 3.14 호환)")
+
+_inject_webrtcvad_stub_if_needed()
+
+
 # ── 지연 로딩 헬퍼 ─────────────────────────────────────────────────────────────
 
 def _get_encoder():

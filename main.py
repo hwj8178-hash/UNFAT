@@ -825,6 +825,9 @@ class WakeWordDetector:
         """resemblyzer VoiceEncoder 지연 로딩 및 캐싱."""
         if self._encoder is None:
             try:
+                # webrtcvad 스텁 먼저 주입 (Python 3.14 호환)
+                from actions.voice_enrollment import _inject_webrtcvad_stub_if_needed
+                _inject_webrtcvad_stub_if_needed()
                 from resemblyzer import VoiceEncoder
                 self._encoder = VoiceEncoder()
             except ImportError:
