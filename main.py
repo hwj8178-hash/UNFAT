@@ -34,6 +34,7 @@ from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.history_researcher import history_research_action
 from actions.obsidian_bridge   import set_vault_path, analyze_research_landscape, get_vault_path
+from actions.hand_gesture      import hand_gesture_control
 from core.claude_client        import is_claude_available as _check_claude
 
 
@@ -545,6 +546,41 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "hand_gesture_control",
+        "description": (
+            "노트북 카메라로 손 제스처를 인식하여 컴퓨터를 제어합니다. "
+            "제스처 목록: 주먹(미디어 일시정지/재생), 손바닥 펼치기(스크롤 중지), "
+            "검지 포인터(마우스 이동), 평화의 손(볼륨 조절), 엄지 위(볼륨 증가), "
+            "엄지 아래(볼륨 감소), OK 손(클릭), 네 손가락(Alt+Tab), "
+            "스와이프 좌우(가상 데스크탑 전환). "
+            "사용자가 '손 인식 켜줘', '제스처 컨트롤 시작', '손으로 컴퓨터 제어', "
+            "'핸드 트래킹 시작' 등을 요청하면 start 명령을 호출하세요. "
+            "'손 인식 꺼줘', '제스처 종료'는 stop 명령을 사용하세요."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "start | stop | status | smoothing"
+                },
+                "camera_index": {
+                    "type": "INTEGER",
+                    "description": "카메라 번호 (기본값: 0, 노트북 내장 카메라)"
+                },
+                "show_preview": {
+                    "type": "BOOLEAN",
+                    "description": "카메라 미리보기 창 표시 여부 (기본값: true)"
+                },
+                "value": {
+                    "type": "NUMBER",
+                    "description": "스무딩 값 (smoothing 명령 시 사용, 0.05~1.0, 기본값: 0.20)"
+                }
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "save_memory",
         "description": (
             "Save an important personal fact about the user to long-term memory. "
@@ -840,6 +876,17 @@ class JarvisLive:
                     )
                 )
                 result = r or "옵시디안 볼트가 설정되었습니다."
+
+            elif name == "hand_gesture_control":
+                action = args.get("action", "start")
+                self.ui.write_log(f"SYS: 손 제스처 제어 — {action}")
+                ui_ref = self.ui
+                speak_fn = self.speak
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: hand_gesture_control(action, args, player=ui_ref, speak_fn=speak_fn)
+                )
+                result = r or "완료."
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
