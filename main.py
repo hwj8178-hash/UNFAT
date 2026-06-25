@@ -620,13 +620,44 @@ TOOL_DECLARATIONS = [
 
 class WakeWordDetector:
     """
-    'Wake up Wonjuns' 구문을 감지하면 on_wake() 콜백을 호출합니다.
-    sounddevice 오디오 콜백에서 PCM 데이터를 feed() 로 공급받아
-    SpeechRecognition(Google API)으로 인식합니다.
+    'Wake up Wonjuns' / '원준아 일어나' 등의 구문을 감지하면 on_wake() 를 호출합니다.
+    영어(en-US)와 한국어(ko-KR) 인식을 순서대로 시도합니다.
     """
-    _PHRASES = [
+
+    # ── 영어 웨이크 문구 ─────────────────────────────────────────────────────
+    _EN_PHRASES = [
         "wake up wonjuns", "wake up wanjuns", "wake up won juns",
-        "wonjuns wake up", "hey wonjuns", "hi wonjuns", "wake wonjuns",
+        "wonjuns wake up", "hey wonjuns",    "hi wonjuns",
+        "wake wonjuns",    "okay wonjuns",   "ok wonjuns",
+    ]
+
+    # ── 한국어 웨이크 문구 ───────────────────────────────────────────────────
+    _KO_PHRASES = [
+        # 일어나 (자다가 일어나 = wake up) — 가장 자연스러운 호출
+        "원준아 일어나",   "원준 일어나",    "원준스 일어나",
+        "일어나 원준아",   "일어나 원준",    "일어나 원준스",
+        "원준아 일어나요", "원준아 일어나봐", "원준아 일어나라",
+        # 깨어나 / 깨워 (깨어나다 = awaken)
+        "원준아 깨어나",   "원준 깨어나",    "원준스 깨어나",
+        "원준아 깨워",     "원준 깨워",      "원준스 깨워",
+        "깨어나 원준아",   "깨어나 원준",
+        "원준아 깨어나요", "원준아 깨워줘",
+        # 켜줘 / 켜 (전원 켜기 = turn on)
+        "원준아 켜줘",     "원준 켜줘",      "원준스 켜줘",
+        "원준아 켜",       "켜줘 원준아",    "원준아 켜봐",
+        # 시작 / 시작해 (start)
+        "원준아 시작",     "원준아 시작해",  "원준아 시작해줘",
+        "원준 시작",       "원준스 시작",    "시작해 원준아",
+        "원준아 시작하자", "원준아 시작할게",
+        # 활성화 (activate)
+        "원준아 활성화",   "원준 활성화",    "원준스 활성화",
+        "원준아 활성화해", "원준아 활성화해줘",
+        # 기동 (boot / launch)
+        "원준아 기동",     "원준 기동",      "원준스 기동",
+        "원준아 기동해",   "원준아 기동해줘",
+        # 준비 (get ready)
+        "원준아 준비해",   "원준아 준비",    "원준 준비해",
+        "원준스 준비",
     ]
 
     def __init__(self, sample_rate: int = 16000, on_wake=None):
@@ -658,7 +689,7 @@ class WakeWordDetector:
             return
 
         rec = sr.Recognizer()
-        rec.energy_threshold        = 400
+        rec.energy_threshold         = 400
         rec.dynamic_energy_threshold = False
 
         WINDOW = self._rate * 3 * 2   # 3초 @ 16kHz int16(2바이트)
@@ -688,12 +719,26 @@ class WakeWordDetector:
             if now < self._cooldown:
                 continue
 
+            audio = sr.AudioData(acc[-WINDOW:], self._rate, 2)
+
+            # ① 영어 인식 시도
             try:
-                audio = sr.AudioData(acc[-WINDOW:], self._rate, 2)
-                text  = rec.recognize_google(audio, language="en-US").lower()
-                if any(p in text for p in self._PHRASES):
-                    print(f"[WONJUNS] 🎤 웨이크워드 감지: '{text}'")
-                    self._cooldown = now + 4.0   # 4초 쿨다운
+                en_text = rec.recognize_google(audio, language="en-US").lower()
+                if any(p in en_text for p in self._EN_PHRASES):
+                    print(f"[WONJUNS] 🎤 영어 웨이크워드 감지: '{en_text}'")
+                    self._cooldown = now + 4.0
+                    if self._on_wake:
+                        self._on_wake()
+                    continue
+            except Exception:
+                pass
+
+            # ② 한국어 인식 시도
+            try:
+                ko_text = rec.recognize_google(audio, language="ko-KR").lower()
+                if any(p in ko_text for p in self._KO_PHRASES):
+                    print(f"[WONJUNS] 🎤 한국어 웨이크워드 감지: '{ko_text}'")
+                    self._cooldown = now + 4.0
                     if self._on_wake:
                         self._on_wake()
             except Exception:
