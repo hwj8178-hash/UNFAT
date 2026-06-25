@@ -355,16 +355,20 @@ def _detect_document_date(text: str) -> str:
         (r'(\d{4})년\s*(\d{1,2})월(?!\s*\d)',
          lambda m: f"{m.group(1)}-{int(m.group(2)):02d}"),
 
-        # "YYYY-MM-DD" or "YYYY/MM/DD"
-        (r'\b(\d{4})[-/](\d{2})[-/](\d{2})\b',
+        # "YYYY-MM-DD", "YYYY/MM/DD", or "YYYY.MM.DD" (Korean dot format)
+        (r'\b(\d{4})[-/.](\d{2})[-/.](\d{2})\b',
          lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)}"),
 
         # "MM/DD/YYYY" or "MM-DD-YYYY" (US format)
         (r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b',
          lambda m: f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"),
 
+        # "1953년" — Korean year-only suffix
+        (r'(\d{4})년(?!\s*\d+월)',
+         lambda m: m.group(1)),
+
         # Standalone year near document header keywords
-        (r'(?:dated?|date:|published?:?|issued?:?)\s*[,:]?\s*(\d{4})',
+        (r'(?:dated?|date:|published?:?|issued?:?|작성\s*연도\s*:|일자\s*:)\s*[,:]?\s*(\d{4})',
          lambda m: m.group(1)),
 
         # "Volume ... 1945" — year only
