@@ -68,6 +68,9 @@ class ExtractedDocument:
     nikh_reference: str = ""         # 전체 참조번호 (예: "AUS2012_001_0001_0001")
     nikh_ref_parsed: dict = field(default_factory=dict)  # 파싱된 구성요소
 
+    # v4: 한자 처리
+    hanja_density: float = 0.0       # 전체 텍스트 중 한자 비율 (0.0~1.0)
+
     # ── 기본 텍스트 프로퍼티 ──────────────────────────────────────────────────
 
     @property
@@ -305,6 +308,22 @@ def _post_process(doc: ExtractedDocument) -> None:
         doc.nikh_reference = nikh_ref
         doc.nikh_ref_parsed = nikh_parsed
         print(f"[DocExtract] 국편 사료참조번호 감지: {nikh_ref}")
+
+    # 한자 밀도 감지 및 병기 주석 처리
+    try:
+        from .hanja_processor import detect_hanja_density, annotate_hanja
+        full = doc.full_text
+        doc.hanja_density = detect_hanja_density(full)
+        if doc.hanja_density >= 0.05:
+            print(f"[DocExtract] 한자 감지: 밀도 {doc.hanja_density:.1%} — 병기 주석 처리 시작")
+            for page in doc.pages:
+                if page.text.strip():
+                    page.text = annotate_hanja(page.text)
+            print(f"[DocExtract] 한자 병기 완료: 총 {len(doc.pages)}페이지")
+        elif doc.hanja_density > 0:
+            print(f"[DocExtract] 한자 감지: 밀도 {doc.hanja_density:.1%} (낮음 — 주석 생략)")
+    except Exception as e:
+        print(f"[DocExtract] 한자 처리 오류 (무시): {e}")
 
 
 def _parse_nikh_reference(file_path: str) -> tuple[str, dict]:
@@ -797,7 +816,8 @@ def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
         import easyocr
-        _ocr_reader = easyocr.Reader(["ko", "en"], gpu=False)
+        # ch_tra(번체자) 추가: 한자가 병용된 역사 문헌 스캔 인식률 향상
+        _ocr_reader = easyocr.Reader(["ko", "en", "ch_tra"], gpu=False)
     return _ocr_reader
 
 

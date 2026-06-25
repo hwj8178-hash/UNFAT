@@ -160,6 +160,17 @@ def _analyze_with_best_ai(doc: ExtractedDocument, log_fn=None) -> tuple[dict, st
     # v2: 구조화 텍스트 사용 (목차+장절 헤더 포함)
     text_for_analysis = doc.get_text_with_structure()
 
+    # v4: 한자 독음 안내 블록 생성
+    hanja_guide = ""
+    if getattr(doc, "hanja_density", 0.0) >= 0.05:
+        try:
+            from .hanja_processor import build_hanja_guide_for_prompt
+            hanja_guide = build_hanja_guide_for_prompt(doc.full_text)
+            if hanja_guide:
+                _log(f"한자 독음 안내 생성: {doc.hanja_density:.1%} 밀도")
+        except Exception as e:
+            _log(f"한자 안내 생성 오류 (무시): {e}")
+
     # Claude 우선 시도
     if _claude_available():
         try:
@@ -175,6 +186,7 @@ def _analyze_with_best_ai(doc: ExtractedDocument, log_fn=None) -> tuple[dict, st
                 document_date=doc.document_date,
                 document_language=doc.document_language,
                 toc_text=doc.toc_text,
+                hanja_guide=hanja_guide,
             )
 
             if is_large:

@@ -41,7 +41,14 @@ HISTORY_SYSTEM_PROMPT = """당신은 역사학 전문 연구 분석 AI입니다.
 4. ⚠️[불확실] 구간의 인용은 uncertain: true로 표시합니다
 5. 불확실한 정보는 "⚠️ 확인 필요"로 명시합니다
 6. 미국 정부문서·신문·외교문서는 날짜·기관·수신자·발신자를 최우선으로 추출합니다
-7. 반드시 JSON 형식만으로 응답합니다 — 앞뒤 설명 없이 JSON만"""
+7. 반드시 JSON 형식만으로 응답합니다 — 앞뒤 설명 없이 JSON만
+
+【한자(漢字) 처리 원칙 — 절대 준수】
+- 한자 독음(讀音)은 한국어 고유 읽기를 사용합니다: 獨立→독립, 朝鮮→조선, 大韓→대한
+- 유사어·동의어·해석어로 절대 대체 금지: 獨立을 "자립", "자주", "독자"로 바꾸지 않습니다
+- 텍스트에 漢字(한글) 병기 형식이 있으면 괄호 안 한글이 정확한 독음입니다
+- 한자 용어는 그 시대 한국어 독음을 그대로 유지하세요 (현대 중국어 발음 사용 금지)
+- [한자 독음 안내] 섹션이 제공되면 반드시 그 표를 따르세요"""
 
 SYNTHESIS_SYSTEM_PROMPT = """당신은 역사학 연구사 분석 전문가입니다.
 여러 논문과 자료의 분석 결과를 종합하여 연구사의 흐름, 논쟁 구도, 공백을 파악합니다.
@@ -135,7 +142,10 @@ _ANALYSIS_SCHEMA = """{
     "파생될 수 있는 새로운 연구 문제"
   ],
   "liner_highlights": ["라이너 하이라이트용 핵심 문장 (최대 5개)"],
-  "uncertainty_notes": ["⚠️ 원본 확인 필요 항목"]
+  "uncertainty_notes": ["⚠️ 원본 확인 필요 항목"],
+  "hanja_glossary": [
+    {"hanja": "漢字", "reading": "한자", "meaning": "한자 (필요 시 뜻 보충)"}
+  ]
 }"""
 
 
@@ -148,6 +158,7 @@ def _build_analysis_prompt(
     document_date: str = "",
     document_language: str = "",
     toc_text: str = "",
+    hanja_guide: str = "",
 ) -> str:
     """Claude 분석용 완전한 프롬프트를 생성합니다."""
 
@@ -171,6 +182,9 @@ def _build_analysis_prompt(
         meta_hints.append(f"[서지정보 감지용 첫 페이지]\n{first_pages_text[:2000]}")
     if meta_hints:
         sections.append("\n".join(meta_hints))
+
+    if hanja_guide:
+        sections.append(hanja_guide)
 
     context_block = "\n\n".join(sections)
 
@@ -221,6 +235,8 @@ def analyze_document_with_claude(
     document_date: str = "",
     document_language: str = "",
     toc_text: str = "",
+    # v4: 한자 처리
+    hanja_guide: str = "",
 ) -> dict:
     """
     Claude API로 역사학 문서를 심층 분석합니다.
@@ -244,6 +260,7 @@ def analyze_document_with_claude(
         document_date=document_date,
         document_language=document_language,
         toc_text=toc_text,
+        hanja_guide=hanja_guide,
     )
 
     try:
@@ -359,6 +376,8 @@ def analyze_large_document_with_claude(
     document_date: str = "",
     document_language: str = "",
     toc_text: str = "",
+    # v4: 한자
+    hanja_guide: str = "",
 ) -> dict:
     """
     대용량 문서를 청크 단위로 분석한 뒤 종합합니다.
@@ -370,6 +389,7 @@ def analyze_large_document_with_claude(
             first_pages_text=first_pages_text,
             document_date=document_date, document_language=document_language,
             toc_text=toc_text,
+            hanja_guide=hanja_guide,
         )
 
     chunks = _split_into_page_chunks(text_with_pages, CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
@@ -379,7 +399,7 @@ def analyze_large_document_with_claude(
     for i, chunk in enumerate(chunks, 1):
         print(f"[Claude] 청크 {i}/{len(chunks)} 분석 중...")
         try:
-            # 첫 청크에만 TOC·서지정보 전달 (이후 청크는 내용 분석에 집중)
+            # 첫 청크에만 TOC·서지정보·한자 안내 전달
             analysis = analyze_document_with_claude(
                 text_with_pages=chunk,
                 file_path=f"{file_path} [청크 {i}/{len(chunks)}]",
@@ -389,6 +409,7 @@ def analyze_large_document_with_claude(
                 document_date=document_date,
                 document_language=document_language,
                 toc_text=toc_text if i == 1 else "",
+                hanja_guide=hanja_guide if i == 1 else "",
             )
             chunk_analyses.append(analysis)
         except Exception as e:
