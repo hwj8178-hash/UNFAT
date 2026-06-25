@@ -41,6 +41,11 @@ class ExtractedDocument:
     def full_text(self) -> str:
         return "\n\n".join(p.text for p in self.pages if p.text.strip())
 
+    @property
+    def total_chars(self) -> int:
+        """추출된 전체 텍스트의 총 글자 수"""
+        return sum(len(p.text) for p in self.pages)
+
     def get_text_with_pages(self) -> str:
         """각주 작성에 사용할 페이지 번호 포함 텍스트"""
         parts = []
@@ -51,6 +56,44 @@ class ExtractedDocument:
                     marker += f" ⚠️[불확실: {p.uncertainty_reason}]"
                 parts.append(f"{marker}\n{p.text}")
         return "\n\n".join(parts)
+
+    def get_page_chunks(
+        self, chunk_chars: int = 130_000, overlap_chars: int = 8_000
+    ) -> list[str]:
+        """
+        대용량 문서를 위한 청크 단위 텍스트 분할.
+        각 청크는 [p.N] 경계를 존중하며, 문맥 유지를 위해 overlap_chars만큼 중첩합니다.
+        """
+        full = self.get_text_with_pages()
+        if len(full) <= chunk_chars:
+            return [full]
+
+        sections = re.split(r'(?=\[p\.\d+\])', full)
+        chunks: list[str] = []
+        current: list[str] = []
+        current_size = 0
+
+        for sec in sections:
+            sec_size = len(sec)
+            if current_size + sec_size > chunk_chars and current:
+                chunks.append("".join(current))
+                tail: list[str] = []
+                tail_size = 0
+                for s in reversed(current):
+                    if tail_size + len(s) > overlap_chars:
+                        break
+                    tail.insert(0, s)
+                    tail_size += len(s)
+                current = tail + [sec]
+                current_size = tail_size + sec_size
+            else:
+                current.append(sec)
+                current_size += sec_size
+
+        if current:
+            chunks.append("".join(current))
+
+        return chunks
 
 
 def extract_document(file_path: str) -> ExtractedDocument:

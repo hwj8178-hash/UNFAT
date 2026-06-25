@@ -95,23 +95,41 @@ def analyze_document(
 def _analyze_with_best_ai(doc: ExtractedDocument) -> tuple[dict, str]:
     """
     Claude → Gemini 순서로 분석을 시도합니다.
+    대용량 문서는 자동으로 청크 분할 후 종합합니다.
     성공한 AI 이름도 함께 반환합니다.
     """
     text_with_pages = doc.get_text_with_pages()
     knowledge_context = get_knowledge_summary()
+    is_large = doc.total_chars > 160_000
 
     # Claude 우선 시도
     if _claude_available():
         try:
-            from core.claude_client import analyze_document_with_claude
-            analysis = analyze_document_with_claude(
-                text_with_pages=text_with_pages,
-                file_path=doc.file_path,
-                knowledge_context=knowledge_context,
+            from core.claude_client import (
+                analyze_document_with_claude,
+                analyze_large_document_with_claude,
+                SINGLE_PASS_CHARS,
             )
+            if is_large:
+                print(
+                    f"[Research] 대용량 문서 ({doc.total_chars:,}자) — 청킹 분석 시작"
+                )
+                analysis = analyze_large_document_with_claude(
+                    text_with_pages=text_with_pages,
+                    file_path=doc.file_path,
+                    knowledge_context=knowledge_context,
+                )
+                ai_label = f"Claude (청크×{analysis.get('_chunk_count', '?')})"
+            else:
+                analysis = analyze_document_with_claude(
+                    text_with_pages=text_with_pages,
+                    file_path=doc.file_path,
+                    knowledge_context=knowledge_context,
+                )
+                ai_label = "Claude"
             analysis["file_path"] = doc.file_path
             analysis["file_type"] = doc.file_type
-            return analysis, "Claude"
+            return analysis, ai_label
         except Exception as e:
             print(f"[Research] Claude 분석 실패, Gemini로 폴백: {e}")
 
@@ -161,7 +179,7 @@ def _build_analysis_prompt(text: str, file_path: str, knowledge_context: str) ->
 {knowledge_context}
 
 === 문서 텍스트 (파일: {file_path}) ===
-{text[:12000]}
+{text[:100_000]}
 
 JSON으로만 응답:
 {{

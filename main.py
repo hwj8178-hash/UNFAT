@@ -70,9 +70,12 @@ def _load_system_prompt() -> str:
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
-def _clean_transcript(text: str) -> str:    
+def _clean_transcript(text: str) -> str:
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
+    # 연속 공백·줄바꿈 정리
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 TOOL_DECLARATIONS = [
@@ -707,10 +710,16 @@ class JarvisLive:
             parts.append(knowledge_ctx)
         parts.append(sys_prompt)
 
+        # 한국어 전사 언어 코드 설정
+        try:
+            transcription_cfg = types.AudioTranscriptionConfig(language_code="ko-KR")
+        except Exception:
+            transcription_cfg = {}
+
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            output_audio_transcription={},
-            input_audio_transcription={},
+            output_audio_transcription=transcription_cfg,
+            input_audio_transcription=transcription_cfg,
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             session_resumption=types.SessionResumptionConfig(),

@@ -15,6 +15,12 @@ import json
 import re
 from pathlib import Path
 
+# 단일 패스 한도: ~40K 토큰, 대부분 학술 논문 커버
+SINGLE_PASS_CHARS = 160_000
+# 청킹 임계값 초과 시 청크 크기 및 중첩
+CHUNK_SIZE_CHARS  = 130_000
+CHUNK_OVERLAP_CHARS = 8_000
+
 
 HISTORY_SYSTEM_PROMPT = """당신은 역사학 전문 연구 분석 AI입니다. 주어진 학술 텍스트를 엄밀하게 분석합니다.
 
@@ -86,7 +92,7 @@ def analyze_document_with_claude(
 
 {knowledge_context}{liner_section}
 === 문서 텍스트 (파일: {file_path}) ===
-{text_with_pages[:14000]}
+{text_with_pages[:SINGLE_PASS_CHARS]}
 
 다음 JSON 형식으로만 응답하세요:
 {{
@@ -126,7 +132,7 @@ def analyze_document_with_claude(
     try:
         response = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=HISTORY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}]
         )
@@ -149,7 +155,7 @@ def synthesize_research_gaps_with_claude(
     """
     client = _get_client()
 
-    papers_text = json.dumps(papers_json_list, ensure_ascii=False, indent=2)[:12000]
+    papers_text = json.dumps(papers_json_list, ensure_ascii=False, indent=2)[:40000]
 
     response = client.messages.create(
         model=model,
@@ -201,6 +207,149 @@ def extract_footnote_with_claude(
     if is_uncertain and "⚠️" not in result:
         result += "\n⚠️ [이 인용은 텍스트 추출이 불확실합니다 — 원본 파일 직접 확인 필요]"
     return result
+
+
+def analyze_large_document_with_claude(
+    text_with_pages: str,
+    file_path: str,
+    knowledge_context: str = "",
+    model: str = "claude-opus-4-8",
+) -> dict:
+    """
+    대용량 문서를 청크 단위로 분석한 뒤 종합합니다.
+    SINGLE_PASS_CHARS 이하이면 단일 패스로 처리하고,
+    초과하면 CHUNK_SIZE_CHARS 크기로 나눠 각 청크를 분석한 뒤 병합합니다.
+    """
+    if len(text_with_pages) <= SINGLE_PASS_CHARS:
+        return analyze_document_with_claude(
+            text_with_pages, file_path, knowledge_context, model=model
+        )
+
+    chunks = _split_into_page_chunks(text_with_pages, CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
+    print(f"[Claude] 대용량 문서 청킹: {len(text_with_pages):,}자 → {len(chunks)}청크")
+
+    chunk_analyses = []
+    for i, chunk in enumerate(chunks, 1):
+        print(f"[Claude] 청크 {i}/{len(chunks)} 분석 중...")
+        try:
+            analysis = analyze_document_with_claude(
+                text_with_pages=chunk,
+                file_path=f"{file_path} [청크 {i}/{len(chunks)}]",
+                knowledge_context=knowledge_context,
+                model=model,
+            )
+            chunk_analyses.append(analysis)
+        except Exception as e:
+            print(f"[Claude] 청크 {i} 분석 실패: {e}")
+
+    if not chunk_analyses:
+        raise RuntimeError("모든 청크 분석에 실패했습니다.")
+
+    return _merge_chunk_analyses(chunk_analyses, file_path, model)
+
+
+def _split_into_page_chunks(
+    text: str,
+    chunk_size: int = CHUNK_SIZE_CHARS,
+    overlap: int = CHUNK_OVERLAP_CHARS,
+) -> list[str]:
+    """[p.N] 페이지 경계를 기준으로 대용량 텍스트를 청크로 분할합니다."""
+    if len(text) <= chunk_size:
+        return [text]
+
+    # [p.숫자] 마커 앞에서 분할
+    sections = re.split(r'(?=\[p\.\d+\])', text)
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+
+    for section in sections:
+        sec_size = len(section)
+        if current_size + sec_size > chunk_size and current:
+            chunks.append("".join(current))
+            # 이전 청크 끝부분을 중첩으로 가져와 문맥 유지
+            tail: list[str] = []
+            tail_size = 0
+            for s in reversed(current):
+                if tail_size + len(s) > overlap:
+                    break
+                tail.insert(0, s)
+                tail_size += len(s)
+            current = tail + [section]
+            current_size = tail_size + sec_size
+        else:
+            current.append(section)
+            current_size += sec_size
+
+    if current:
+        chunks.append("".join(current))
+
+    return chunks
+
+
+def _merge_chunk_analyses(analyses: list[dict], file_path: str, model: str) -> dict:
+    """여러 청크 분석 결과를 하나의 통합 분석으로 병합합니다."""
+    if len(analyses) == 1:
+        return analyses[0]
+
+    merged = dict(analyses[0])
+
+    # 리스트 필드: 중복 제거 후 합산
+    list_fields = [
+        "key_arguments", "primary_sources", "keywords",
+        "related_works", "research_gaps", "liner_highlights", "uncertainty_notes",
+    ]
+    for field in list_fields:
+        seen: set[str] = set()
+        combined: list[str] = []
+        for a in analyses:
+            for item in a.get(field, []):
+                item_str = str(item)
+                if item_str not in seen:
+                    seen.add(item_str)
+                    combined.append(item)
+        merged[field] = combined
+
+    # 각주: 페이지 번호 기준 중복 제거 후 정렬
+    seen_fn: set[tuple] = set()
+    all_footnotes: list[dict] = []
+    for a in analyses:
+        for fn in a.get("footnotes", []):
+            key = (fn.get("page"), fn.get("text", "")[:60])
+            if key not in seen_fn:
+                seen_fn.add(key)
+                all_footnotes.append(fn)
+    merged["footnotes"] = sorted(all_footnotes, key=lambda x: x.get("page", 0))
+
+    # 핵심 주장: Claude Sonnet으로 청크 주장 통합 요약
+    try:
+        client = _get_client()
+        all_theses = "\n".join(
+            f"[청크{i+1}] {a.get('main_thesis', '')}"
+            for i, a in enumerate(analyses)
+            if a.get("main_thesis")
+        )
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=600,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "다음 청크별 핵심 주장을 하나의 통합된 핵심 주장으로 요약하세요 (2-3문장):\n\n"
+                    + all_theses
+                ),
+            }]
+        )
+        merged["main_thesis"] = response.content[0].text.strip()
+    except Exception as e:
+        print(f"[Claude] 주장 통합 실패: {e}")
+        merged["main_thesis"] = " | ".join(
+            a.get("main_thesis", "") for a in analyses if a.get("main_thesis")
+        )[:500]
+
+    merged["_chunked"] = True
+    merged["_chunk_count"] = len(analyses)
+    return merged
 
 
 def is_claude_available() -> bool:
