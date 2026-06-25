@@ -63,6 +63,30 @@ Gemini(음성·제어) + Claude(분석) + Liner(웹 수집)를 함께 운용합�
   "연구 공백 찾아줘", "새로운 연구 주제", "지금까지 분석 종합해줘" → 즉시 호출.
   처리 AI: Claude (여러 논문 교차 추론)
 
+[학술 작문 → write_research_draft]
+  학습된 논문들의 실제 문체를 참조하여 AI 투 없이 학술 문장을 작성합니다.
+  논문 분석이 많을수록 더 정확한 문체 모방이 가능합니다.
+
+  발화 예시 → 파라미터 매핑:
+  • "이 주제로 서론 써줘: [주제]"           → topic="주제", section_type="intro"
+  • "이 내용 논문 스타일로 써줘"            → topic=내용, section_type="body"
+  • "논증 단락 작성해줘"                    → section_type="argument"
+  • "결론 써줘"                             → section_type="conclusion"
+  • "이 문장 다듬어줘: [문장]"              → topic=문장, section_type="refine"
+  • "학술 문체로 바꿔줘"                    → section_type="refine"
+  • "짧게 써줘" / "길게 써줘"              → length="short" / "long"
+  • "이 사료 분석 단락 써줘"               → section_type="analysis"
+
+  section_type 값: intro / body / argument / conclusion / analysis / refine
+  length 값: short(2~3문장) / medium(기본, 1단락) / long(2~3단락)
+
+[초고 문체 검토 → check_writing_style]
+  "이 문장 AI 같아?", "초고 검토해줘", "AI 표현 있어?", "내 글 스타일 체크해줘"
+  → draft 파라미터에 초고 전달, AI 투 표현 감지 및 개선점 제안
+
+[문체 코퍼스 현황 → get_style_corpus_stats]
+  "몇 개 논문 학습됐어?", "문체 학습 현황", "코퍼스 상태 보여줘" → 즉시 호출
+
 [각주 생성 → generate_footnote]
   "~페이지 각주 만들어줘", "~쪽 인용 찾아줘",
   "N장 N절 각주", "몇 페이지 어느 절에서 나왔어" → 즉시 호출.

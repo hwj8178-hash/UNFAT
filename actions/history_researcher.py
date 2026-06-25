@@ -122,6 +122,15 @@ def analyze_document(
         analysis["nikh_reference"] = doc.nikh_reference
         analysis["nikh_ref_parsed"] = doc.nikh_ref_parsed
 
+    # 4c. 문체 코퍼스 업데이트 (한국어/일본어 논문만 — 작문 학습용)
+    try:
+        from .style_learner import update_style_corpus
+        n_new = update_style_corpus(analysis)
+        if n_new > 0:
+            _log(f"문체 코퍼스 업데이트: {n_new}개 문장 추가")
+    except Exception as e:
+        _log(f"문체 코퍼스 업데이트 실패 (무시): {e}")
+
     # 5. Obsidian 저장
     obsidian_result = ""
     if save_to_obsidian:
@@ -728,6 +737,9 @@ def history_research_action(command: str, parameters: dict, player=None) -> str:
       analyze_url            - 웹 URL → Liner → Claude → Obsidian
       find_research_gaps     - Claude 기반 연구사 공백 종합 분석
       generate_footnote      - Claude 기반 각주 생성
+      write_research_draft   - 학습 논문 문체 기반 작문
+      check_writing_style    - 초고의 AI 투 표현 검토
+      get_style_corpus_stats - 학습된 문체 코퍼스 현황
       set_vault_path         - Obsidian 볼트 경로 설정
     """
     from .obsidian_bridge import set_vault_path
@@ -765,6 +777,45 @@ def history_research_action(command: str, parameters: dict, player=None) -> str:
         page = int(parameters.get("page", 1))
         hint = parameters.get("quote_hint", "")
         return generate_footnote(fp, page, hint)
+
+    elif command == "write_research_draft":
+        from .writing_assistant import write_research_draft
+        topic = parameters.get("topic", "")
+        if not topic:
+            return "❌ 작성 주제(topic)가 필요합니다."
+        return write_research_draft(
+            topic=topic,
+            content=parameters.get("content", ""),
+            section_type=parameters.get("section_type", "body"),
+            length=parameters.get("length", "medium"),
+            player=player,
+        )
+
+    elif command == "check_writing_style":
+        from .writing_assistant import write_with_style_check
+        draft = parameters.get("draft", "")
+        if not draft:
+            return "❌ 검토할 초고(draft)가 필요합니다."
+        return write_with_style_check(draft)
+
+    elif command == "get_style_corpus_stats":
+        from .style_learner import get_corpus_stats
+        stats = get_corpus_stats()
+        if stats["paper_count"] == 0:
+            return "📚 아직 학습된 논문이 없습니다. 논문 분석 후 자동으로 문체가 학습됩니다."
+        lines = [
+            f"📚 문체 코퍼스 현황: {stats['paper_count']}편 / {stats['total_sentences']}개 문장",
+            "",
+        ]
+        for p in stats["papers"]:
+            period = f" [{p['period']}]" if p.get("period") else ""
+            lines.append(f"  • {p['title']}{period} — {p['sentence_count']}문장")
+        if stats["top_connectives"]:
+            conns = ", ".join(
+                f"{k}({v})" for k, v in list(stats["top_connectives"].items())[:8]
+            )
+            lines.append(f"\n자주 쓰인 접속사: {conns}")
+        return "\n".join(lines)
 
     elif command == "set_vault_path":
         vp = parameters.get("vault_path", "")

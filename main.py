@@ -618,6 +618,83 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "write_research_draft",
+        "description": (
+            "학습된 논문들의 실제 문체를 참조하여 학술 한국어 산문을 작성합니다. "
+            "AI 투의 작위적 표현 없이 실제 역사학 논문처럼 작성합니다. "
+            "'서론 써줘', '이 내용 논문 스타일로 작성해줘', '결론 단락 만들어줘', "
+            "'이 주제로 논문 초고 써줘', '문장 다듬어줘', '학술 문체로 바꿔줘' 등에 즉시 호출하세요. "
+            "논문 분석이 많을수록 더 정확한 문체 모방이 가능합니다."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "topic": {
+                    "type": "STRING",
+                    "description": (
+                        "작성 주제 또는 다듬을 문장/단락. "
+                        "예: '한국전쟁 초기 미국의 개입 결정과 그 배경', "
+                        "'이 문장을 다듬어줘: [원문]'"
+                    )
+                },
+                "content": {
+                    "type": "STRING",
+                    "description": (
+                        "포함할 아이디어, 키워드, 핵심 내용 (선택). "
+                        "예: '맥아더 전략, 유엔 결의안 678호, 인천상륙작전'"
+                    )
+                },
+                "section_type": {
+                    "type": "STRING",
+                    "description": (
+                        "작성할 단락 유형. "
+                        "intro(서론) / body(본문) / argument(논증) / "
+                        "conclusion(결론) / analysis(사료분석) / refine(문장다듬기). "
+                        "기본값: body"
+                    )
+                },
+                "length": {
+                    "type": "STRING",
+                    "description": (
+                        "분량. short(2~3문장) / medium(1단락) / long(2~3단락). "
+                        "기본값: medium"
+                    )
+                },
+            },
+            "required": ["topic"]
+        }
+    },
+    {
+        "name": "check_writing_style",
+        "description": (
+            "작성한 초고에서 AI 투의 상투적 표현을 찾아 개선점을 알려줍니다. "
+            "'이 문장 AI 같아 보여?', '초고 검토해줘', 'AI 표현 있어?', "
+            "'내 글 스타일 체크해줘' 등에 호출하세요."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "draft": {
+                    "type": "STRING",
+                    "description": "검토할 초고 텍스트"
+                }
+            },
+            "required": ["draft"]
+        }
+    },
+    {
+        "name": "get_style_corpus_stats",
+        "description": (
+            "학습된 논문 문체 코퍼스 현황을 보여줍니다. "
+            "'문체 학습 현황 보여줘', '몇 개 논문 학습됐어', '코퍼스 상태' 등에 호출하세요."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
         "name": "enroll_voice",
         "description": (
             "사용자 목소리를 학습하여 웨이크워드 화자 인증 프로필을 저장합니다. "
@@ -1134,6 +1211,33 @@ class JarvisLive:
                     lambda: history_research_action("analyze_url", args, player=ui_ref)
                 )
                 result = r or "URL 분석이 완료되었습니다."
+
+            elif name == "write_research_draft":
+                topic = args.get("topic", "")
+                stype = args.get("section_type", "body")
+                self.ui.write_log(f"SYS: 학술 작문 생성 중 [{stype}] — {topic[:40]}")
+                ui_ref = self.ui
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: history_research_action("write_research_draft", args, player=ui_ref)
+                )
+                result = r or "작문이 완료되었습니다."
+
+            elif name == "check_writing_style":
+                draft = args.get("draft", "")
+                self.ui.write_log(f"SYS: 초고 문체 검토 중 ({len(draft)}자)")
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: history_research_action("check_writing_style", args)
+                )
+                result = r or "문체 검토가 완료되었습니다."
+
+            elif name == "get_style_corpus_stats":
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: history_research_action("get_style_corpus_stats", {})
+                )
+                result = r or "코퍼스 통계를 불러왔습니다."
 
             elif name == "find_research_gaps":
                 ai_label = "Claude + " if _check_claude() else ""
