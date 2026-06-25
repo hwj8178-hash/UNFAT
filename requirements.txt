@@ -1,0 +1,45 @@
+sounddevice
+google-genai
+google-generativeai
+pillow
+requests
+beautifulsoup4
+duckduckgo-search
+playwright
+pyautogui
+pyperclip
+pygetwindow
+opencv-python
+numpy
+mss
+psutil
+send2trash
+youtube-transcript-api
+python-pptx
+fastapi
+uvicorn[standard]
+cryptography
+python-multipart
+comtypes; sys_platform == "win32"
+pycaw; sys_platform == "win32"
+win10toast; sys_platform == "win32"
+pywinauto; sys_platform == "win32"
+qrcode[pil]
+
+# ── 역사학 연구 특화 의존성 ──────────────────────────────────────────────────
+# PDF 페이지별 텍스트 추출 (각주 페이지 번호 지원)
+pdfplumber
+
+# 워드 파일 텍스트 추출
+python-docx
+
+# 한국어·영어 OCR (스캔 이미지, 스캔 PDF)
+easyocr
+
+# HWP(한글) 파일 텍스트 추출
+# hwp5 패키지 설치: pip install pyhwp (선택사항, 없으면 LibreOffice 변환 사용)
+# pyhwp
+
+# 이미지 처리 (easyocr 내부 사용)
+torch
+torchvision
