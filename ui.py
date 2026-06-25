@@ -607,7 +607,7 @@ class LogWidget(QTextEdit):
         self._pos    = 0
         tl = self._text.lower()
         if   tl.startswith("you:"):    self._tag = "you"
-        elif tl.startswith("jarvis:"): self._tag = "ai"
+        elif tl.startswith("wonjuns:"): self._tag = "ai"
         elif tl.startswith("file:"):   self._tag = "file"
         elif "err" in tl:              self._tag = "err"
         else:                          self._tag = "sys"
@@ -733,7 +733,7 @@ class FileDropZone(QWidget):
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a file for JARVIS", str(Path.home()),
+            self, "Select a file for WONJUNS", str(Path.home()),
             "All Files (*.*);;"
             "Images (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg);;"
             "Documents (*.pdf *.docx *.txt *.md *.pptx);;"
@@ -1175,7 +1175,7 @@ class RemoteKeyOverlay(QWidget):
         self._qr_label.setStyleSheet(
             "color: #00ff88; background: #001a0d; border-radius: 10px;"
         )
-        self._timer_lbl.setText("Phone connected — JARVIS ready")
+        self._timer_lbl.setText("Phone connected — WONJUNS ready")
         self._timer_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
 
     def _refresh_key(self):
@@ -1218,7 +1218,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, face_path: str):
         super().__init__()
-        self.setWindowTitle("J.A.R.V.I.S — MARK XLVI")
+        self.setWindowTitle("W.O.N.J.U.N.S")
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
 
@@ -1230,7 +1230,7 @@ class MainWindow(QMainWindow):
 
         self.on_text_command  = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
-        self._muted           = False
+        self._muted           = True   # 시작 시 슬리핑 — 웨이크워드 대기
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
 
@@ -1251,6 +1251,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self._left_panel, stretch=0)
 
         self.hud = HudCanvas(face_path)
+        self.hud.muted = True  # 시작 시 슬리핑
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body.addWidget(self.hud, stretch=5)
 
@@ -1372,16 +1373,16 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_badge("MARK XLVI", C.PRI_DIM))
+        lay.addWidget(_badge("CLIO v3", C.PRI_DIM))
         lay.addStretch()
 
         mid = QVBoxLayout(); mid.setSpacing(1)
-        title = QLabel("J.A.R.V.I.S")
+        title = QLabel("W.O.N.J.U.N.S")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         mid.addWidget(title)
-        sub = QLabel("Just A Rather Very Intelligent System")
+        sub = QLabel("원준의 멀티 AI 연구 비서 시스템")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setFont(QFont("Courier New", 7))
         sub.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
@@ -1613,7 +1614,7 @@ class MainWindow(QMainWindow):
         cat  = _file_category(p)
         icon, _ = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
         size = _fmt_size(p.stat().st_size)
-        self._file_hint.setText(f"{icon}  {p.name}  ·  {size}  ·  Tell JARVIS what to do with it")
+        self._file_hint.setText(f"{icon}  {p.name}  ·  {size}  ·  Tell WONJUNS what to do with it")
         self._log.append_log(f"FILE: {p.name} ({size}) loaded")
         if self.on_text_command:
             msg = (
@@ -1668,9 +1669,19 @@ class MainWindow(QMainWindow):
             self._apply_state("LISTENING")
             self._log.append_log("SYS: Microphone active.")
 
+    def wake_up(self):
+        """웨이크워드 감지 시 호출 — 음소거 해제 및 활성화 로그."""
+        if not self._muted:
+            return
+        self._muted = False
+        self.hud.muted = False
+        self._style_mute_btn()
+        self._apply_state("LISTENING")
+        self._log.append_log("SYS: 🎤 웨이크워드 감지 — WONJUNS 활성화")
+
     def _style_mute_btn(self):
         if self._muted:
-            self._mute_btn.setText("🔇  MICROPHONE MUTED")
+            self._mute_btn.setText("🌙  SAY  'WAKE UP WONJUNS'")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #140006; color: {C.MUTED_C};
@@ -1731,7 +1742,7 @@ class MainWindow(QMainWindow):
             self._overlay.hide()
             self._overlay = None
         self._apply_state("LISTENING")
-        self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. JARVIS online.")
+        self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. WONJUNS online.")
 
 class _RootShim:
     def __init__(self, app: QApplication):
@@ -1781,6 +1792,10 @@ class JarvisUI:
 
     def notify_phone_connected(self) -> None:
         self._win.notify_phone_connected()
+
+    def wake_up(self) -> None:
+        """웨이크워드 감지 시 스레드 안전 활성화."""
+        self._win.wake_up()
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)

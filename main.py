@@ -1,4 +1,5 @@
 import asyncio
+import queue as _queue
 import re
 import threading
 import json
@@ -63,9 +64,9 @@ def _load_system_prompt() -> str:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are JARVIS, Tony Stark's AI assistant. "
-            "Be concise, direct, and always use the provided tools to complete tasks. "
-            "Never simulate or guess results — always call the appropriate tool."
+            "당신은 WONJUNS, 원준의 멀티 AI 연구 비서입니다. "
+            "간결하고 명확하게 답변하며, 항상 적절한 도구를 호출하여 작업을 완료합니다. "
+            "결과를 추측하거나 시뮬레이션하지 말고 항상 도구를 호출하세요."
         )
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
@@ -364,10 +365,10 @@ TOOL_DECLARATIONS = [
     {
         "name": "shutdown_jarvis",
         "description": (
-            "Shuts down the assistant completely. "
-            "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Jarvis. "
-            "The user can say this in ANY language."
+            "WONJUNS를 완전히 종료합니다. "
+            "사용자가 대화 종료, 프로그램 닫기, 작별 인사, 'WONJUNS 꺼줘', '종료해줘', "
+            "'잘자 원준스', 'goodbye', 'shut down', 'stop wonjuns' 등을 말하면 호출하세요. "
+            "어떤 언어로든 종료 의도를 표현하면 즉시 호출합니다."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -615,6 +616,90 @@ TOOL_DECLARATIONS = [
     },
 ]
 
+# --- Wake word detector ---
+
+class WakeWordDetector:
+    """
+    'Wake up Wonjuns' 구문을 감지하면 on_wake() 콜백을 호출합니다.
+    sounddevice 오디오 콜백에서 PCM 데이터를 feed() 로 공급받아
+    SpeechRecognition(Google API)으로 인식합니다.
+    """
+    _PHRASES = [
+        "wake up wonjuns", "wake up wanjuns", "wake up won juns",
+        "wonjuns wake up", "hey wonjuns", "hi wonjuns", "wake wonjuns",
+    ]
+
+    def __init__(self, sample_rate: int = 16000, on_wake=None):
+        self._rate     = sample_rate
+        self._on_wake  = on_wake
+        self._q: _queue.Queue[bytes] = _queue.Queue(maxsize=500)
+        self._active   = True
+        self._cooldown = 0.0
+        threading.Thread(
+            target=self._loop, daemon=True, name="wake-detector"
+        ).start()
+
+    def feed(self, pcm_bytes: bytes):
+        try:
+            self._q.put_nowait(pcm_bytes)
+        except _queue.Full:
+            pass
+
+    def stop(self):
+        self._active = False
+
+    def _loop(self):
+        import time
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            print("[WONJUNS] ⚠️  SpeechRecognition 미설치 — 웨이크워드 비활성")
+            print("[WONJUNS]    설치: pip install SpeechRecognition")
+            return
+
+        rec = sr.Recognizer()
+        rec.energy_threshold        = 400
+        rec.dynamic_energy_threshold = False
+
+        WINDOW = self._rate * 3 * 2   # 3초 @ 16kHz int16(2바이트)
+        acc = b""
+
+        while self._active:
+            time.sleep(0.4)
+
+            chunks: list[bytes] = []
+            try:
+                while True:
+                    chunks.append(self._q.get_nowait())
+            except _queue.Empty:
+                pass
+
+            if not chunks:
+                continue
+
+            acc += b"".join(chunks)
+            if len(acc) > WINDOW * 2:
+                acc = acc[-WINDOW:]
+
+            if len(acc) < WINDOW // 3:
+                continue
+
+            now = time.time()
+            if now < self._cooldown:
+                continue
+
+            try:
+                audio = sr.AudioData(acc[-WINDOW:], self._rate, 2)
+                text  = rec.recognize_google(audio, language="en-US").lower()
+                if any(p in text for p in self._PHRASES):
+                    print(f"[WONJUNS] 🎤 웨이크워드 감지: '{text}'")
+                    self._cooldown = now + 4.0   # 4초 쿨다운
+                    if self._on_wake:
+                        self._on_wake()
+            except Exception:
+                pass   # 무음·인식 실패 — 조용히 무시
+
+
 # --- Plugin system ---
 
 
@@ -633,6 +718,7 @@ class JarvisLive:
         self.ui.on_remote_clicked = self._make_remote_key
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
+        self._wake_detector: WakeWordDetector | None = None
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -680,7 +766,27 @@ class JarvisLive:
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
-        self.speak(f"Sir, {tool_name} encountered an error. {short}")
+        self.speak(f"원준씨, {tool_name} 실행 중 오류가 발생했습니다. {short}")
+
+    def _on_wake_word(self):
+        """웨이크워드 감지 콜백 — 뮤트 해제 후 Gemini에 인사 요청."""
+        if not self.ui.muted:
+            return
+        self.ui.wake_up()
+        def _greet():
+            import time
+            time.sleep(0.5)
+            if self._loop and self.session:
+                asyncio.run_coroutine_threadsafe(
+                    self.session.send_client_content(
+                        turns={"parts": [{
+                            "text": "웨이크워드로 활성화됐습니다. 원준씨에게 준비됐다고 짧게 인사하세요."
+                        }]},
+                        turn_complete=True,
+                    ),
+                    self._loop,
+                )
+        threading.Thread(target=_greet, daemon=True).start()
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -736,7 +842,7 @@ class JarvisLive:
         name = fc.name
         args = dict(fc.args or {})
 
-        print(f"[JARVIS] 🔧 {name}  {args}")
+        print(f"[WONJUNS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
         if name == "save_memory":
@@ -899,7 +1005,7 @@ class JarvisLive:
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
-                self.speak("Goodbye, sir.")
+                self.speak("알겠습니다, 원준씨. 종료합니다.")
                 def _shutdown():
                     import time, os
                     time.sleep(1)
@@ -917,7 +1023,7 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        print(f"[WONJUNS] 📤 {name} → {str(result)[:80]}")
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result}
@@ -929,14 +1035,18 @@ class JarvisLive:
             await self.session.send_realtime_input(media=msg)
 
     async def _listen_audio(self):
-        print("[JARVIS] 🎤 Mic started")
+        print("[WONJUNS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            data = indata.tobytes()
+            # 웨이크워드 감지기에 항상 공급 (뮤트 여부 무관)
+            if self._wake_detector:
+                self._wake_detector.feed(data)
+            # 음소거 해제 시에만 Gemini로 전송
             with self._speaking_lock:
-                jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted and not self._phone_active:
-                data = indata.tobytes()
+                wonjuns_speaking = self._is_speaking
+            if not wonjuns_speaking and not self.ui.muted and not self._phone_active:
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm"}
@@ -950,15 +1060,15 @@ class JarvisLive:
                 blocksize=CHUNK_SIZE,
                 callback=callback,
             ):
-                print("[JARVIS] 🎤 Mic stream open")
+                print("[WONJUNS] 🎤 Mic stream open")
                 while True:
                     await asyncio.sleep(0.1)
         except Exception as e:
-            print(f"[JARVIS] ❌ Mic: {e}")
+            print(f"[WONJUNS] ❌ Mic: {e}")
             raise
 
     async def _receive_audio(self):
-        print("[JARVIS] 👂 Recv started")
+        print("[WONJUNS] 👂 Recv started")
         out_buf, in_buf = [], []
 
         try:
@@ -1000,7 +1110,7 @@ class JarvisLive:
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"Jarvis: {full_out}")
+                                self.ui.write_log(f"Wonjuns: {full_out}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -1012,19 +1122,19 @@ class JarvisLive:
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
+                            print(f"[WONJUNS] 📞 {fc.name}")
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
         except Exception as e:
-            print(f"[JARVIS] ❌ Recv: {e}")
+            print(f"[WONJUNS] ❌ Recv: {e}")
             traceback.print_exc()
             raise
 
     async def _play_audio(self):
-        print("[JARVIS] 🔊 Play started")
+        print("[WONJUNS] 🔊 Play started")
 
         stream = sd.RawOutputStream(
             samplerate=RECEIVE_SAMPLE_RATE,
@@ -1053,7 +1163,7 @@ class JarvisLive:
                 self.set_speaking(True)
                 await asyncio.to_thread(stream.write, chunk)
         except Exception as e:
-            print(f"[JARVIS] ❌ Play: {e}")
+            print(f"[WONJUNS] ❌ Play: {e}")
             raise
         finally:
             self.set_speaking(False)
@@ -1117,6 +1227,13 @@ class JarvisLive:
     async def run(self):
         self._loop = asyncio.get_event_loop()
 
+        # 웨이크워드 감지기 — 최초 1회 생성
+        if self._wake_detector is None:
+            self._wake_detector = WakeWordDetector(
+                sample_rate=SEND_SAMPLE_RATE,
+                on_wake=self._on_wake_word,
+            )
+
         client = genai.Client(
             api_key=_get_api_key(),
             http_options={"api_version": "v1beta"}
@@ -1136,7 +1253,7 @@ class JarvisLive:
 
         while True:
             try:
-                print("[JARVIS] Connecting...")
+                print("[WONJUNS] Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
@@ -1149,9 +1266,9 @@ class JarvisLive:
                     self.out_queue        = asyncio.Queue(maxsize=200)
                     self._turn_done_event = asyncio.Event()
 
-                    print("[JARVIS] Connected.")
+                    print("[WONJUNS] Connected.")
                     self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: JARVIS online.")
+                    self.ui.write_log("SYS: WONJUNS online. — 'Wake up Wonjuns'라고 말해 활성화하세요.")
 
                     if self._dashboard:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})
@@ -1164,7 +1281,7 @@ class JarvisLive:
                         tg.create_task(self._relay_phone_audio())
 
             except Exception as e:
-                print(f"[JARVIS] Error: {e}")
+                print(f"[WONJUNS] Error: {e}")
                 traceback.print_exc()
             finally:
                 self.session = None
@@ -1175,7 +1292,7 @@ class JarvisLive:
             if self._dashboard:
                 await self._dashboard.broadcast({"type": "status", "state": "sleeping"})
 
-            print("[JARVIS] Reconnecting in 3s...")
+            print("[WONJUNS] Reconnecting in 3s...")
             await asyncio.sleep(3)
 
 def main():
