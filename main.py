@@ -451,6 +451,9 @@ TOOL_DECLARATIONS = [
             "각 인용문이 몇 장 몇 절 몇 페이지에서 나왔는지 정확히 추적합니다. "
             "미국 자료(정부문서, 신문, 외교전문 등)는 날짜·기관·기밀등급·발신수신자를 추출합니다. "
             "한국 학술논문은 역사학적 시기·지역·계층·연구사 공백을 분석합니다. "
+            "미국 국립문서기록청(NARA) 자료의 경우 Record Group(RG)과 Entry 번호를 함께 전달하면 "
+            "옵시디안 노트에 NARA 아카이브 출처가 정확히 기록됩니다. "
+            "사용자가 'RG 59, Entry 1234' 같은 아카이브 식별자를 언급하면 반드시 파라미터로 전달하세요. "
             "분석 결과는 옵시디안(Obsidian) 볼트에 자동 저장됩니다. "
             "사용자가 논문이나 자료 파일을 분석해달라고 하면 반드시 이 도구를 사용하세요."
         ),
@@ -460,6 +463,30 @@ TOOL_DECLARATIONS = [
                 "file_path": {
                     "type": "STRING",
                     "description": "분석할 파일의 전체 경로 (PDF, HWP, DOCX, JPG, PNG)"
+                },
+                "record_group": {
+                    "type": "STRING",
+                    "description": (
+                        "미국 NARA 레코드그룹 번호. "
+                        "사용자가 'RG 59', '레코드그룹 59', 'Record Group 59' 등을 언급하면 '59' 또는 'RG 59'로 추출. "
+                        "예: '59', 'RG 59', 'RG 242', 'RG 319'"
+                    )
+                },
+                "entry": {
+                    "type": "STRING",
+                    "description": (
+                        "미국 NARA 엔트리 번호. "
+                        "사용자가 'Entry 1234', '엔트리 1234', 'Entry A1 1234' 등을 언급하면 추출. "
+                        "예: '1234', 'A1 1234', 'UD-WW 1234'"
+                    )
+                },
+                "box": {
+                    "type": "STRING",
+                    "description": "박스 번호 (언급된 경우). 예: '5', 'Box 5'"
+                },
+                "folder": {
+                    "type": "STRING",
+                    "description": "폴더명 (언급된 경우). 예: 'Korea 1945'"
                 },
                 "save_to_obsidian": {
                     "type": "BOOLEAN",
@@ -1082,8 +1109,14 @@ class JarvisLive:
                 if not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
                 ai_label = "Claude" if _check_claude() else "Gemini"
+                rg_info = ""
+                if args.get("record_group"):
+                    rg_info = f" [RG {args['record_group']}"
+                    if args.get("entry"):
+                        rg_info += f" / Entry {args['entry']}"
+                    rg_info += "]"
                 self.ui.write_log(
-                    f"SYS: 문서 분석 시작 [{ai_label}] — {args.get('file_path', '')}"
+                    f"SYS: 문서 분석 시작 [{ai_label}]{rg_info} — {args.get('file_path', '')}"
                 )
                 ui_ref = self.ui
                 r = await loop.run_in_executor(

@@ -32,6 +32,21 @@ Gemini(음성·제어) + Claude(분석) + Liner(웹 수집)를 함께 운용합�
   "논문 분석해줘", "이 파일 읽어줘", "업로드한 자료 정리해줘" → 즉시 호출.
   분석 AI: Claude (없으면 Gemini 폴백)
 
+  【미국 국립문서보관소(NARA) 자료 식별 — 필수】
+  사용자가 파일 분석 전에 RG(레코드그룹) 또는 Entry(엔트리)를 언급하면
+  반드시 analyze_research_document의 파라미터로 추출해서 전달하세요.
+
+  발화 예시 → 파라미터 매핑:
+  • "RG 59, 엔트리 1234 자료야"         → record_group="59", entry="1234"
+  • "레코드그룹 263, 엔트리 22"         → record_group="263", entry="22"
+  • "RG 242, 박스 5, 폴더 3"            → record_group="242", box="5", folder="3"
+  • "NARA RG 59 Entry 1234"             → record_group="59", entry="1234"
+  • "이건 국무부 자료야, RG 59"         → record_group="59"
+  • "엔트리가 22번이고 박스는 5야"      → entry="22", box="5"
+
+  RG/Entry 정보는 Obsidian 노트의 아카이브 출처 섹션에 자동 포함됩니다.
+  사용자가 RG/Entry를 말하지 않아도 파일 분석은 정상 진행됩니다.
+
   【출력 내용】
   • 목차(TOC) 자동 감지 → 전체 장/절 구조 표시
   • 각 인용문: "제2장 > 제1절 > p.45" 형식의 정확한 위치

@@ -51,12 +51,21 @@ def analyze_document(
     file_path: str,
     save_to_obsidian: bool = True,
     player=None,
+    record_group: str = "",
+    entry: str = "",
+    box: str = "",
+    folder: str = "",
 ) -> str:
     """
     로컬 문서를 분석합니다.
     1단계: document_extractor로 텍스트·페이지·목차·날짜 추출
     2단계: Claude API로 심층 역사학 분석 (장/절 귀속 포함)
-    3단계: Obsidian에 결과 저장
+    3단계: Obsidian에 결과 저장 (NARA RG/Entry 포함)
+
+    record_group: NARA Record Group 번호 (예: "59", "RG 59")
+    entry:        NARA Entry 번호 (예: "1234", "A1 1234")
+    box:          Box 번호
+    folder:       Folder명
     """
     def _log(msg: str):
         print(f"[Research] {msg}")
@@ -88,6 +97,10 @@ def analyze_document(
         _log(f"날짜 감지: {doc.document_date}")
     if doc.document_language:
         _log(f"언어 감지: {doc.document_language}")
+    if record_group or entry:
+        rg_str = f"RG {record_group}" if record_group else ""
+        en_str = f"Entry {entry}" if entry else ""
+        _log(f"아카이브 식별자: {' / '.join(filter(None, [rg_str, en_str]))}")
 
     # 2. Claude 분석 시도 → 실패 시 Gemini 폴백
     analysis, ai_used = _analyze_with_best_ai(doc, _log)
@@ -97,7 +110,12 @@ def analyze_document(
         analysis.setdefault("uncertainty_notes", [])
         analysis["uncertainty_notes"].extend(doc.extraction_warnings)
 
-    # 4. Obsidian 저장
+    # 4. NARA 아카이브 식별자 삽입 (사용자가 제공한 경우)
+    archive_info = _build_archive_info(record_group, entry, box, folder)
+    if archive_info:
+        analysis["archive_info"] = archive_info
+
+    # 5. Obsidian 저장
     obsidian_result = ""
     if save_to_obsidian:
         try:
@@ -461,6 +479,8 @@ def _format_voice_summary(analysis: dict, obsidian_result: str, ai_used: str) ->
 
     parts: list[str] = []
 
+    archive_info = analysis.get("archive_info", {})
+
     # ── 헤더: 문서 유형에 따라 아이콘 구분 ──────────────────────────────────
     TYPE_ICON = {
         "academic_paper":       "📄",
@@ -476,6 +496,19 @@ def _format_voice_summary(analysis: dict, obsidian_result: str, ai_used: str) ->
     icon = TYPE_ICON.get(doc_type, "📁")
     full_title = f"{title}{(' — ' + subtitle) if subtitle else ''}"
     parts.append(f"{icon} 분석 완료 [{ai_used}]: {full_title}")
+
+    # ── NARA 아카이브 출처 블록 (최우선 표시) ────────────────────────────────
+    if archive_info:
+        arc_parts = []
+        if archive_info.get("record_group"):
+            arc_parts.append(archive_info["record_group"])
+        if archive_info.get("entry"):
+            arc_parts.append(archive_info["entry"])
+        if archive_info.get("box"):
+            arc_parts.append(archive_info["box"])
+        if archive_info.get("folder"):
+            arc_parts.append(f"Folder: {archive_info['folder']}")
+        parts.append(f"🏛️ NARA 출처: {' / '.join(arc_parts)}")
 
     # ── 서지사항 블록 ────────────────────────────────────────────────────────
     bib_parts: list[str] = []
@@ -610,6 +643,35 @@ def _format_date_ko(date_str: str) -> str:
     return f"{parts[0]}년"
 
 
+def _build_archive_info(
+    record_group: str, entry: str, box: str, folder: str
+) -> dict:
+    """NARA 아카이브 식별자 딕셔너리를 구성합니다."""
+    if not record_group and not entry:
+        return {}
+
+    # "59" → "RG 59", "RG 59" → "RG 59"
+    rg = record_group.strip()
+    if rg and not rg.upper().startswith("RG"):
+        rg = f"RG {rg}"
+
+    en = entry.strip()
+    if en and not en.lower().startswith("entry"):
+        en = f"Entry {en}"
+
+    bx = box.strip()
+    if bx and not bx.lower().startswith("box"):
+        bx = f"Box {bx}"
+
+    return {
+        "record_group": rg,
+        "entry": en,
+        "box": bx,
+        "folder": folder.strip(),
+        "repository": "NARA (National Archives and Records Administration)",
+    }
+
+
 def _fallback_analysis(doc: ExtractedDocument, error_msg: str) -> dict:
     return {
         "title": doc.title,
@@ -649,7 +711,15 @@ def history_research_action(command: str, parameters: dict, player=None) -> str:
         fp = parameters.get("file_path", "")
         if not fp:
             return "❌ 파일 경로가 필요합니다."
-        return analyze_document(fp, parameters.get("save_to_obsidian", True), player=player)
+        return analyze_document(
+            file_path=fp,
+            save_to_obsidian=parameters.get("save_to_obsidian", True),
+            player=player,
+            record_group=parameters.get("record_group", ""),
+            entry=parameters.get("entry", ""),
+            box=parameters.get("box", ""),
+            folder=parameters.get("folder", ""),
+        )
 
     elif command == "analyze_url":
         url = parameters.get("url", "")

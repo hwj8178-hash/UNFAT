@@ -55,19 +55,33 @@ def save_research_note(analysis: dict, vault_path: Optional[Path] = None) -> str
     analysis 딕셔너리 구조:
       title, file_path, file_type, authors, year, journal,
       main_thesis, key_arguments, methodology, primary_sources,
-      footnotes, research_gaps, keywords, related_works, uncertainty_notes
+      footnotes, research_gaps, keywords, related_works, uncertainty_notes,
+      archive_info (NARA RG/Entry 정보, 선택)
     """
     vault = vault_path or get_vault_path()
     if not vault:
         return "❌ 옵시디안 볼트 경로가 설정되지 않았습니다. '옵시디안 볼트 경로 설정 [경로]' 명령을 사용하세요."
 
-    # 저장 디렉터리 구조
-    research_dir = vault / "역사학연구" / "논문분석"
+    # NARA 자료는 별도 폴더에 저장
+    archive_info = analysis.get("archive_info", {})
+    if archive_info.get("record_group"):
+        rg_safe = re.sub(r'[\\/:*?"<>|\s]', "_", archive_info["record_group"])
+        research_dir = vault / "역사학연구" / "미국자료" / rg_safe
+    else:
+        research_dir = vault / "역사학연구" / "논문분석"
     research_dir.mkdir(parents=True, exist_ok=True)
 
     title = analysis.get("title", "제목없음")
     safe_title = re.sub(r'[\\/:*?"<>|]', "_", title)
-    note_path = research_dir / f"{safe_title}.md"
+
+    # NARA 자료는 파일명에 RG/Entry 포함
+    if archive_info.get("record_group"):
+        rg = archive_info["record_group"].replace(" ", "")
+        en = archive_info.get("entry", "").replace("Entry ", "E").replace(" ", "")
+        prefix = f"{rg}_{en}_" if en else f"{rg}_"
+        note_path = research_dir / f"{prefix}{safe_title}.md"
+    else:
+        note_path = research_dir / f"{safe_title}.md"
 
     content = _build_research_note(analysis)
     note_path.write_text(content, encoding="utf-8")
@@ -77,71 +91,219 @@ def save_research_note(analysis: dict, vault_path: Optional[Path] = None) -> str
     _update_author_index(vault, title, analysis.get("authors", []))
     _update_concept_map(vault, title, analysis)
 
-    return f"✅ 옵시디안 노트 저장 완료: {note_path}\n연결된 개념: {', '.join(analysis.get('keywords', [])[:5])}"
+    archive_label = ""
+    if archive_info.get("record_group"):
+        archive_label = f" [{archive_info['record_group']}"
+        if archive_info.get("entry"):
+            archive_label += f" / {archive_info['entry']}"
+        archive_label += "]"
+
+    return (
+        f"✅ 옵시디안 노트 저장 완료{archive_label}: {note_path}\n"
+        f"연결된 개념: {', '.join(analysis.get('keywords', [])[:5])}"
+    )
 
 
 def _build_research_note(a: dict) -> str:
-    """마크다운 형식의 연구 노트 생성"""
+    """마크다운 형식의 연구 노트 생성 (NARA 아카이브 정보 포함)"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    title = a.get("title", "제목없음")
-    authors = ", ".join(a.get("authors", ["저자미상"]))
-    year = a.get("year", "연도미상")
-    journal = a.get("journal", "")
+    title       = a.get("title", "제목없음")
+    subtitle    = a.get("subtitle", "")
+    authors     = ", ".join(a.get("authors", ["저자미상"]))
+    year        = a.get("year", "연도미상")
+    doc_date    = a.get("document_date", "")
+    doc_type    = a.get("document_type", "")
+    journal     = a.get("journal_or_source", "") or a.get("journal", "")
+    publisher   = a.get("publisher", "")
+    pub_place   = a.get("publication_place", "")
+    issuing     = a.get("issuing_body", "")
+    senders     = a.get("senders", [])
+    recipients  = a.get("recipients", [])
+    classif     = a.get("classification", "")
+    hist_period = a.get("historical_period", "")
+    geo_scope   = a.get("geographical_scope", "")
     source_file = a.get("file_path", "")
+    archive     = a.get("archive_info", {})
 
-    # YAML 프론트매터
+    # ── YAML 프론트매터 ──────────────────────────────────────────────────────
     tags = ["역사학연구"]
+    if doc_type:
+        tags.append(f"자료유형/{doc_type}")
+    if archive.get("record_group"):
+        rg_tag = archive["record_group"].replace(" ", "_")
+        tags.append(f"NARA/{rg_tag}")
+        if archive.get("entry"):
+            en_tag = archive["entry"].replace(" ", "_")
+            tags.append(f"NARA/{rg_tag}/{en_tag}")
     tags += [f"키워드/{k}" for k in a.get("keywords", [])]
     tags += [f"저자/{au.replace(' ', '_')}" for au in a.get("authors", [])]
     tags_str = "\n".join(f"  - {t}" for t in tags)
 
-    keywords_links = " ".join(f"[[{k}]]" for k in a.get("keywords", []))
-    related_links = "\n".join(f"- [[{r}]]" for r in a.get("related_works", []))
-    author_links = ", ".join(f"[[저자/{au}]]" for au in a.get("authors", []))
+    # 프론트매터 추가 필드
+    fm_extra = ""
+    if doc_date:
+        fm_extra += f"\ndocument_date: \"{doc_date}\""
+    if doc_type:
+        fm_extra += f"\ndocument_type: \"{doc_type}\""
+    if archive.get("record_group"):
+        fm_extra += f"\nrecord_group: \"{archive['record_group']}\""
+    if archive.get("entry"):
+        fm_extra += f"\nentry: \"{archive['entry']}\""
+    if archive.get("box"):
+        fm_extra += f"\nbox: \"{archive['box']}\""
+    if archive.get("folder"):
+        fm_extra += f"\nfolder: \"{archive['folder']}\""
+    if classif:
+        fm_extra += f"\nclassification: \"{classif}\""
+    if hist_period:
+        fm_extra += f"\nhistorical_period: \"{hist_period}\""
+    if geo_scope:
+        fm_extra += f"\ngeographical_scope: \"{geo_scope}\""
 
-    # 각주 섹션 구성
+    # ── 위키링크 ─────────────────────────────────────────────────────────────
+    keywords_links = " ".join(f"[[{k}]]" for k in a.get("keywords", []))
+    related_links  = "\n".join(f"- [[{r}]]" for r in a.get("related_works", []))
+    author_links   = ", ".join(f"[[저자/{au}]]" for au in a.get("authors", []))
+
+    # ── NARA 아카이브 출처 섹션 ──────────────────────────────────────────────
+    archive_section = ""
+    if archive.get("record_group") or archive.get("entry"):
+        archive_section = "\n## 🏛️ 아카이브 출처 (NARA)\n\n"
+        archive_section += "| 항목 | 내용 |\n|------|------|\n"
+        if archive.get("record_group"):
+            archive_section += f"| **Record Group** | {archive['record_group']} |\n"
+        if archive.get("entry"):
+            archive_section += f"| **Entry** | {archive['entry']} |\n"
+        if archive.get("box"):
+            archive_section += f"| **Box** | {archive['box']} |\n"
+        if archive.get("folder"):
+            archive_section += f"| **Folder** | {archive['folder']} |\n"
+        archive_section += f"| **Repository** | {archive.get('repository', 'NARA')} |\n"
+
+        # NARA 표준 인용 형식
+        nara_cite_parts = []
+        if archive.get("record_group"):
+            nara_cite_parts.append(archive["record_group"])
+        if archive.get("entry"):
+            nara_cite_parts.append(archive["entry"])
+        if archive.get("box"):
+            nara_cite_parts.append(archive["box"])
+        if archive.get("folder"):
+            nara_cite_parts.append(f'"{archive["folder"]}"')
+        if title and title != "제목없음":
+            nara_cite_parts.append(f'"{title}"')
+        if doc_date:
+            nara_cite_parts.append(doc_date)
+
+        nara_cite = ", ".join(nara_cite_parts)
+        if nara_cite:
+            archive_section += f"\n**NARA 인용 형식**: `{nara_cite}, {archive.get('repository', 'NARA')}`\n"
+
+    # ── 문서 메타 섹션 ───────────────────────────────────────────────────────
+    meta_lines = []
+    if doc_date:
+        meta_lines.append(f"**문서 날짜**: {doc_date}")
+    if doc_type:
+        TYPE_KO = {
+            "academic_paper": "학술논문", "monograph": "단행본",
+            "newspaper_article": "신문기사", "government_document": "정부문서",
+            "diplomatic_cable": "외교전문", "memorandum": "메모/각서",
+            "report": "보고서", "letter": "서한", "testimony": "증언",
+        }
+        meta_lines.append(f"**자료 유형**: {TYPE_KO.get(doc_type, doc_type)}")
+    if authors and authors != "저자미상":
+        meta_lines.append(f"**저자/발신**: {author_links}")
+    if senders:
+        meta_lines.append(f"**발신자**: {', '.join(senders)}")
+    if recipients:
+        meta_lines.append(f"**수신자**: {', '.join(recipients)}")
+    if issuing:
+        meta_lines.append(f"**발행기관**: {issuing}")
+    elif journal:
+        meta_lines.append(f"**출처**: {journal}")
+    if publisher:
+        meta_lines.append(f"**출판사**: {publisher}")
+    if pub_place:
+        meta_lines.append(f"**발행지**: {pub_place}")
+    if classif:
+        meta_lines.append(f"**기밀등급**: `{classif}`")
+    if hist_period:
+        meta_lines.append(f"**시기**: {hist_period}")
+    if geo_scope:
+        meta_lines.append(f"**지역**: {geo_scope}")
+    meta_lines.append(f"**연도**: {year}")
+    meta_lines.append(f"**원본파일**: `{source_file}`")
+    meta_block = "\n".join(meta_lines)
+
+    # ── 목차 섹션 ────────────────────────────────────────────────────────────
+    toc_section = ""
+    toc_data = a.get("toc", [])
+    if toc_data:
+        toc_section = "\n## 📋 목차 구조\n\n"
+        for entry in toc_data:
+            indent = "  " * (entry.get("level", 1) - 1)
+            num    = entry.get("number", "")
+            ttl    = entry.get("title", "")
+            pg     = entry.get("page", 0)
+            pg_str = f" — p.{pg}" if pg > 0 else ""
+            toc_section += f"{indent}- **{num}** {ttl}{pg_str}\n"
+
+    # ── 주요 사건/인물 섹션 (미국 자료) ─────────────────────────────────────
+    events_section = ""
+    key_events  = a.get("key_events", [])
+    key_persons = a.get("key_persons", [])
+    if key_events or key_persons:
+        events_section = "\n## 🔑 주요 사건 및 인물\n\n"
+        if key_events:
+            events_section += "**주요 사건**\n"
+            events_section += _list_to_md(key_events) + "\n\n"
+        if key_persons:
+            events_section += "**주요 인물**\n"
+            events_section += _list_to_md(key_persons) + "\n"
+
+    # ── 각주 섹션 ────────────────────────────────────────────────────────────
     footnotes_section = _build_footnotes_section(a.get("footnotes", []))
 
-    # 불확실 정보 경고
+    # ── 불확실 경고 섹션 ─────────────────────────────────────────────────────
     uncertainty_section = ""
     if a.get("uncertainty_notes"):
         uncertainty_section = "\n## ⚠️ 확인 필요 항목\n"
         for note in a["uncertainty_notes"]:
             uncertainty_section += f"> ⚠️ **자세한 확인 필요**: {note}\n"
 
-    # 연구 공백 섹션
+    # ── 연구 공백 섹션 ───────────────────────────────────────────────────────
     gaps_section = ""
     if a.get("research_gaps"):
         gaps_section = "\n## 🔍 연구사 공백 및 새로운 문제의식\n"
         for gap in a["research_gaps"]:
             gaps_section += f"- {gap}\n"
 
+    # ── 최종 노트 조립 ───────────────────────────────────────────────────────
+    full_title = f"{title}{(' — ' + subtitle) if subtitle else ''}"
+
     note = f"""---
 created: {now}
-title: "{title}"
+title: "{full_title}"
 authors: [{authors}]
 year: {year}
-journal: "{journal}"
+journal: "{journal}"{fm_extra}
 source_file: "{source_file}"
 tags:
 {tags_str}
 ---
 
-# {title}
+# {full_title}
 
-**저자**: {author_links}
-**출판연도**: {year}
-**출처**: {journal}
-**원본파일**: `{source_file}`
+{meta_block}
 
 ---
-
+{archive_section}{toc_section}
 ## 핵심 주장 (Main Thesis)
 
 {a.get("main_thesis", "_추출되지 않음_")}
 
 ---
-
+{events_section}
 ## 주요 논거 (Key Arguments)
 
 {_list_to_md(a.get("key_arguments", []))}
