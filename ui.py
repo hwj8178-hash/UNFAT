@@ -1753,7 +1753,7 @@ class _RootShim:
         pass
 
 
-class JarvisUI:
+class AssistantUI:
     def __init__(self, face_path: str, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")

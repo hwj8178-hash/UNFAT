@@ -11,7 +11,7 @@ from pathlib import Path
 import sounddevice as sd
 from google import genai
 from google.genai import types
-from ui import JarvisUI
+from ui import AssistantUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
@@ -364,7 +364,7 @@ TOOL_DECLARATIONS = [
         }
     },
     {
-        "name": "shutdown_jarvis",
+        "name": "shutdown_assistant",
         "description": (
             "WONJUNS를 완전히 종료합니다. "
             "사용자가 대화 종료, 프로그램 닫기, 작별 인사, 'WONJUNS 꺼줘', '종료해줘', "
@@ -948,9 +948,9 @@ class WakeWordDetector:
 # --- Plugin system ---
 
 
-class JarvisLive:
+class AssistantLive:
 
-    def __init__(self, ui: JarvisUI):
+    def __init__(self, ui: AssistantUI):
         self.ui             = ui
         self.session        = None
         self.audio_in_queue = None
@@ -1299,7 +1299,7 @@ class JarvisLive:
                 if self._wake_detector:
                     self._wake_detector.reload_profile()
 
-            elif name == "shutdown_jarvis":
+            elif name == "shutdown_assistant":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("알겠습니다, 원준씨. 종료합니다.")
                 def _shutdown():
@@ -1409,7 +1409,7 @@ class JarvisLive:
                                 self.ui.write_log(f"Wonjuns: {full_out}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
-                                        "type": "log", "speaker": "jarvis",
+                                        "type": "log", "speaker": "assistant",
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
@@ -1592,13 +1592,13 @@ class JarvisLive:
             await asyncio.sleep(3)
 
 def main():
-    ui = JarvisUI("face.png")
+    ui = AssistantUI("face.png")
 
     def runner():
         ui.wait_for_api_key()
-        jarvis = JarvisLive(ui)
+        assistant = AssistantLive(ui)
         try:
-            asyncio.run(jarvis.run())
+            asyncio.run(assistant.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
 
