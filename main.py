@@ -34,6 +34,7 @@ from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.history_researcher import history_research_action
 from actions.obsidian_bridge   import set_vault_path, analyze_research_landscape, get_vault_path
+from core.claude_client        import is_claude_available as _check_claude
 
 
 def get_base_dir():
@@ -499,6 +500,33 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "liner_research",
+        "description": (
+            "웹 URL의 학술 자료를 Liner AI로 수집·하이라이팅한 뒤 Claude AI로 심층 분석합니다. "
+            "RISS, KISS, DBpia, Google Scholar 등 온라인 논문 URL을 분석할 때 사용하세요. "
+            "로컬 파일(PDF/HWP/DOCX)은 analyze_research_document를 사용하세요. "
+            "사용자가 '이 링크 분석해줘', 'URL 논문 읽어줘', '라이너로 저장해줘' 등을 요청할 때 사용하세요."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "url": {
+                    "type": "STRING",
+                    "description": "분석할 학술 논문 또는 자료의 웹 URL"
+                },
+                "question": {
+                    "type": "STRING",
+                    "description": "Liner AI에게 할 질문 (없으면 기본 역사학 분석 질문 사용)"
+                },
+                "save_to_obsidian": {
+                    "type": "BOOLEAN",
+                    "description": "결과를 옵시디안에 저장할지 여부 (기본값: true)"
+                }
+            },
+            "required": ["url"]
+        }
+    },
+    {
         "name": "set_obsidian_vault",
         "description": (
             "옵시디안 볼트(저장소) 경로를 설정합니다. "
@@ -764,32 +792,52 @@ class JarvisLive:
             elif name == "analyze_research_document":
                 if not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
-                self.ui.write_log(f"SYS: 문서 분석 시작 — {args.get('file_path', '')}")
+                ai_label = "Claude" if _check_claude() else "Gemini"
+                self.ui.write_log(
+                    f"SYS: 문서 분석 시작 [{ai_label}] — {args.get('file_path', '')}"
+                )
+                ui_ref = self.ui
                 r = await loop.run_in_executor(
                     None,
-                    lambda: history_research_action("analyze_document", args)
+                    lambda: history_research_action("analyze_document", args, player=ui_ref)
                 )
                 result = r or "문서 분석이 완료되었습니다."
 
-            elif name == "find_research_gaps":
-                self.ui.write_log("SYS: 연구사 공백 분석 중...")
+            elif name == "liner_research":
+                url = args.get("url", "")
+                self.ui.write_log(f"SYS: Liner + Claude 분석 시작 — {url}")
+                ui_ref = self.ui
                 r = await loop.run_in_executor(
                     None,
-                    lambda: history_research_action("find_research_gaps", {})
+                    lambda: history_research_action("analyze_url", args, player=ui_ref)
+                )
+                result = r or "URL 분석이 완료되었습니다."
+
+            elif name == "find_research_gaps":
+                ai_label = "Claude + " if _check_claude() else ""
+                self.ui.write_log(f"SYS: {ai_label}연구사 공백 분석 중...")
+                ui_ref = self.ui
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: history_research_action("find_research_gaps", {}, player=ui_ref)
                 )
                 result = r or "연구사 공백 분석이 완료되었습니다."
 
             elif name == "generate_footnote":
+                ui_ref = self.ui
                 r = await loop.run_in_executor(
                     None,
-                    lambda: history_research_action("generate_footnote", args)
+                    lambda: history_research_action("generate_footnote", args, player=ui_ref)
                 )
                 result = r or "각주 생성이 완료되었습니다."
 
             elif name == "set_obsidian_vault":
                 r = await loop.run_in_executor(
                     None,
-                    lambda: history_research_action("set_vault_path", {"vault_path": args.get("vault_path", "")})
+                    lambda: history_research_action(
+                        "set_vault_path",
+                        {"vault_path": args.get("vault_path", "")}
+                    )
                 )
                 result = r or "옵시디안 볼트가 설정되었습니다."
 

@@ -1,12 +1,14 @@
 """
-history_researcher.py — 역사학 연구 분석 핵심 모듈
+history_researcher.py — 역사학 연구 분석 핵심 모듈 (멀티 AI 파이프라인)
 
-기능:
-  - 학술 논문 및 역사 자료 심층 분석
-  - 주요 주장, 문제의식, 방법론 추출
-  - 페이지 번호 포함 원문 인용 각주 생성
-  - 연구사 공백 및 새로운 문제의식 도출
-  - 옵시디안 연동 저장 및 지식 그래프 업데이트
+AI 역할 분담:
+  Gemini  → 음성 인식 + 명령 처리 + 컴퓨터 제어 (main.py)
+  Claude  → 로컬 문서(PDF/HWP/DOCX/이미지) 심층 분석, 각주, 연구사 정리
+  Liner   → 웹 URL 기반 자료 수집 및 AI 하이라이팅
+
+파이프라인:
+  로컬 파일 → document_extractor → Claude 분석 → Obsidian 저장
+  웹 URL    → Liner 웹앱 (브라우저 자동화) → Claude 병합 분석 → Obsidian 저장
 """
 
 from __future__ import annotations
@@ -16,21 +18,42 @@ from pathlib import Path
 from typing import Optional
 
 from .document_extractor import extract_document, ExtractedDocument
-from .obsidian_bridge import save_research_note, analyze_research_landscape, get_knowledge_summary
+from .obsidian_bridge import (
+    save_research_note, analyze_research_landscape,
+    get_knowledge_summary, get_vault_path,
+)
 
 
-def _get_gemini_client():
-    config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
-    with open(config_path, "r", encoding="utf-8") as f:
-        api_key = json.load(f)["gemini_api_key"]
-    from google import genai
-    return genai.Client(api_key=api_key)
+# ─── Claude/Liner 가용성 확인 ────────────────────────────────────────────────
+
+def _claude_available() -> bool:
+    try:
+        from core.claude_client import is_claude_available
+        return is_claude_available()
+    except Exception:
+        return False
 
 
-def analyze_document(file_path: str, save_to_obsidian: bool = True) -> str:
+def _liner_available() -> bool:
+    try:
+        from actions.liner_bridge import open_liner_for_manual_review  # noqa
+        return True
+    except Exception:
+        return False
+
+
+# ─── 로컬 파일 분석 (Claude 주도) ───────────────────────────────────────────
+
+def analyze_document(
+    file_path: str,
+    save_to_obsidian: bool = True,
+    player=None,
+) -> str:
     """
-    문서를 분석하여 역사학 연구 관점에서 핵심 내용을 추출합니다.
-    결과를 옵시디안에 저장하고 요약을 반환합니다.
+    로컬 문서를 분석합니다.
+    1단계: document_extractor로 텍스트·페이지 번호 추출
+    2단계: Claude API로 심층 역사학 분석
+    3단계: Obsidian에 결과 저장
     """
     # 1. 텍스트 추출
     try:
@@ -50,174 +73,195 @@ def analyze_document(file_path: str, save_to_obsidian: bool = True) -> str:
             f"⚠️ 자세한 확인이 필요합니다:\n{warnings}"
         )
 
-    # 2. LLM으로 역사학적 분석
-    analysis = _analyze_with_llm(doc)
+    # 2. Claude 분석 시도 → 실패 시 Gemini 폴백
+    analysis, ai_used = _analyze_with_best_ai(doc)
 
-    # 3. 추출 경고 추가
+    # 3. 추출 경고 병합
     if doc.extraction_warnings:
         analysis.setdefault("uncertainty_notes", [])
         analysis["uncertainty_notes"].extend(doc.extraction_warnings)
 
-    # 4. 옵시디안 저장
+    # 4. Obsidian 저장
     obsidian_result = ""
     if save_to_obsidian:
-        obsidian_result = save_research_note(analysis)
+        try:
+            obsidian_result = save_research_note(analysis)
+        except Exception as e:
+            obsidian_result = f"⚠️ Obsidian 저장 실패: {e}"
 
-    # 5. 음성 응답용 요약 생성
-    return _format_voice_summary(analysis, obsidian_result)
+    return _format_voice_summary(analysis, obsidian_result, ai_used)
 
 
-def _analyze_with_llm(doc: ExtractedDocument) -> dict:
-    """Gemini를 사용해 역사학 논문 분석"""
+def _analyze_with_best_ai(doc: ExtractedDocument) -> tuple[dict, str]:
+    """
+    Claude → Gemini 순서로 분석을 시도합니다.
+    성공한 AI 이름도 함께 반환합니다.
+    """
     text_with_pages = doc.get_text_with_pages()
-
-    # 현재 지식 그래프 요약 (맥락 제공)
     knowledge_context = get_knowledge_summary()
 
-    system_prompt = """당신은 역사학 전문 연구 보조 AI입니다.
-학술 논문과 역사 자료를 분석하여 다음을 추출하는 것이 임무입니다:
-1. 핵심 주장과 테제
-2. 주요 논거와 근거
-3. 연구 방법론과 사료
-4. 기존 연구와의 관계 및 새로운 문제의식
-5. 정확한 페이지 번호가 포함된 핵심 인용문
+    # Claude 우선 시도
+    if _claude_available():
+        try:
+            from core.claude_client import analyze_document_with_claude
+            analysis = analyze_document_with_claude(
+                text_with_pages=text_with_pages,
+                file_path=doc.file_path,
+                knowledge_context=knowledge_context,
+            )
+            analysis["file_path"] = doc.file_path
+            analysis["file_type"] = doc.file_type
+            return analysis, "Claude"
+        except Exception as e:
+            print(f"[Research] Claude 분석 실패, Gemini로 폴백: {e}")
 
-반드시 JSON 형식으로 응답하세요."""
+    # Gemini 폴백
+    try:
+        analysis = _analyze_with_gemini(doc, text_with_pages, knowledge_context)
+        return analysis, "Gemini"
+    except Exception as e:
+        return _fallback_analysis(doc, str(e)), "없음(오류)"
 
-    user_prompt = f"""다음 역사학 문서를 분석해주세요.
-각 페이지의 텍스트는 [p.숫자] 형식으로 표시되어 있습니다.
-⚠️ 표시가 있는 부분은 추출이 불확실합니다.
+
+def _analyze_with_gemini(
+    doc: ExtractedDocument,
+    text_with_pages: str,
+    knowledge_context: str,
+) -> dict:
+    """Gemini 폴백 분석 (Claude 사용 불가 시)"""
+    config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
+    with open(config_path, "r", encoding="utf-8") as f:
+        api_key = json.load(f)["gemini_api_key"]
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    system_prompt = (
+        "당신은 역사학 전문 연구 보조 AI입니다. "
+        "학술 논문과 역사 자료를 분석하여 핵심 주장, 논거, 방법론, 사료, "
+        "연구 공백, 원문 각주(페이지 번호 필수)를 JSON으로 추출합니다."
+    )
+    user_prompt = _build_analysis_prompt(text_with_pages, doc.file_path, knowledge_context)
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=user_prompt,
+        config={"system_instruction": system_prompt}
+    )
+    raw = response.text.strip()
+    json_match = re.search(r'\{[\s\S]*\}', raw)
+    result = json.loads(json_match.group() if json_match else raw)
+    result["file_path"] = doc.file_path
+    result["file_type"] = doc.file_type
+    return result
+
+
+def _build_analysis_prompt(text: str, file_path: str, knowledge_context: str) -> str:
+    return f"""다음 역사학 문서를 분석해주세요. [p.숫자]가 페이지 번호입니다. ⚠️는 불확실 구간입니다.
 
 {knowledge_context}
 
-=== 문서 텍스트 (파일: {doc.file_path}) ===
-{text_with_pages[:12000]}
+=== 문서 텍스트 (파일: {file_path}) ===
+{text[:12000]}
 
-다음 JSON 형식으로 분석 결과를 반환하세요:
+JSON으로만 응답:
 {{
-  "title": "논문/자료 제목",
-  "authors": ["저자1", "저자2"],
-  "year": "출판연도 (숫자 또는 문자열)",
-  "journal": "학술지명 또는 출처",
-  "main_thesis": "핵심 주장 및 테제 (2-3문장)",
-  "key_arguments": [
-    "주요 논거 1",
-    "주요 논거 2"
-  ],
-  "methodology": "연구 방법론 설명",
-  "primary_sources": [
-    "주요 사료 또는 참고문헌 1",
-    "주요 사료 또는 참고문헌 2"
-  ],
-  "footnotes": [
-    {{
-      "page": 페이지번호,
-      "text": "원문에서 그대로 추출한 핵심 인용 문장",
-      "context": "이 인용문의 논문 내 맥락",
-      "uncertain": false
-    }}
-  ],
-  "keywords": ["핵심키워드1", "핵심키워드2", "핵심키워드3"],
-  "related_works": ["관련 선행 연구 제목 또는 저자"],
-  "research_gaps": [
-    "이 연구가 드러내는 기존 연구의 공백 또는 새로운 문제의식 1",
-    "새로운 연구 방향 제안 2"
-  ],
-  "uncertainty_notes": [
-    "텍스트 추출이 불확실한 부분에 대한 경고 메시지"
-  ]
-}}
+  "title": "제목",
+  "authors": ["저자"],
+  "year": "연도",
+  "journal": "학술지",
+  "main_thesis": "핵심 주장 2-3문장",
+  "key_arguments": ["논거1", "논거2"],
+  "methodology": "방법론",
+  "primary_sources": ["사료1"],
+  "footnotes": [{{"page": 번호, "text": "원문 그대로", "context": "맥락", "uncertain": false}}],
+  "keywords": ["키워드"],
+  "related_works": ["관련 연구"],
+  "research_gaps": ["연구 공백"],
+  "liner_highlights": ["핵심 문장"],
+  "uncertainty_notes": ["경고"]
+}}"""
 
-중요 지침:
-- footnotes의 text는 반드시 원문 텍스트를 그대로 사용하세요 (요약 금지)
-- 정보가 불분명할 경우 해당 필드에 "⚠️ 확인 필요" 표시
-- 텍스트에 ⚠️[불확실] 표시가 있으면 uncertain: true 설정
-- 페이지 번호를 반드시 포함하세요"""
 
-    try:
-        client = _get_gemini_client()
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_prompt,
-            config={"system_instruction": system_prompt}
+# ─── 웹 URL 분석 (Liner + Claude 협업) ──────────────────────────────────────
+
+def analyze_url_with_liner_and_claude(
+    url: str,
+    question: str = "",
+    save_to_obsidian: bool = True,
+    player=None,
+) -> str:
+    """
+    웹 URL 자료를 Liner로 수집한 뒤 Claude로 심층 분석합니다.
+
+    Liner: URL 저장 + AI 요약 + 하이라이트 추출
+    Claude: Liner 결과 기반 역사학적 심층 분석 + 각주 생성
+    """
+    # 1. Liner로 URL 분석
+    from actions.liner_bridge import (
+        analyze_url_with_liner, format_liner_context_for_claude,
+        liner_result_to_analysis_dict
+    )
+
+    liner_result = analyze_url_with_liner(url=url, question=question, player=player)
+
+    if not liner_result.get("success"):
+        err = liner_result.get("error", "알 수 없는 오류")
+        # Liner 실패 시 Liner를 수동으로 열고 Claude에게만 URL 정보 전달
+        open_msg = ""
+        try:
+            from actions.liner_bridge import open_liner_for_manual_review
+            open_liner_for_manual_review(url=url, player=player)
+            open_msg = f" Liner를 열었습니다 — 직접 확인하세요."
+        except Exception:
+            pass
+        return (
+            f"⚠️ Liner 자동 분석 실패: {err}{open_msg}\n"
+            f"URL: {url}\n"
+            f"Liner에서 직접 이 URL을 열어 분석하거나, "
+            f"파일을 다운로드 후 '파일 분석'을 요청해주세요."
         )
-        raw = response.text.strip()
 
-        # JSON 파싱
-        json_match = re.search(r'\{[\s\S]*\}', raw)
-        if json_match:
-            analysis = json.loads(json_match.group())
-        else:
-            analysis = json.loads(raw)
+    liner_context = format_liner_context_for_claude(liner_result)
 
-        analysis["file_path"] = doc.file_path
-        analysis["file_type"] = doc.file_type
-        return analysis
+    # 2. Claude로 Liner 결과 심층 분석
+    analysis = None
+    ai_used = "Liner"
 
-    except json.JSONDecodeError:
-        # JSON 파싱 실패 시 기본 구조로 텍스트 저장
-        return _fallback_analysis(doc, raw if "raw" in dir() else "분석 실패")
-    except Exception as e:
-        return _fallback_analysis(doc, str(e))
+    if _claude_available() and liner_context:
+        try:
+            from core.claude_client import analyze_document_with_claude
+            analysis = analyze_document_with_claude(
+                text_with_pages=liner_context,
+                file_path=url,
+                knowledge_context=get_knowledge_summary(),
+                liner_context="",
+            )
+            analysis["file_path"] = url
+            analysis["file_type"] = "WEB_URL"
+            ai_used = "Liner + Claude"
+        except Exception as e:
+            print(f"[Research] URL Claude 분석 실패: {e}")
 
+    if analysis is None:
+        analysis = liner_result_to_analysis_dict(liner_result, question)
 
-def _fallback_analysis(doc: ExtractedDocument, error_msg: str) -> dict:
-    """LLM 분석 실패 시 기본 구조 반환"""
-    return {
-        "title": doc.title,
-        "authors": ["⚠️ 확인 필요"],
-        "year": "⚠️ 확인 필요",
-        "journal": "⚠️ 확인 필요",
-        "main_thesis": f"⚠️ AI 분석 실패 — 원본 확인 필요. 오류: {error_msg[:200]}",
-        "key_arguments": [],
-        "methodology": "⚠️ 확인 필요",
-        "primary_sources": [],
-        "footnotes": [],
-        "keywords": [],
-        "related_works": [],
-        "research_gaps": [],
-        "uncertainty_notes": [f"AI 분석 오류 발생: {error_msg[:300]}"],
-        "file_path": doc.file_path,
-        "file_type": doc.file_type,
-    }
+    # 3. Obsidian 저장
+    obsidian_result = ""
+    if save_to_obsidian:
+        try:
+            obsidian_result = save_research_note(analysis)
+        except Exception as e:
+            obsidian_result = f"⚠️ Obsidian 저장 실패: {e}"
+
+    return _format_voice_summary(analysis, obsidian_result, ai_used)
 
 
-def _format_voice_summary(analysis: dict, obsidian_result: str) -> str:
-    """음성 비서 응답용 요약 포맷"""
-    title = analysis.get("title", "제목미상")
-    authors = ", ".join(analysis.get("authors", ["저자미상"]))
-    year = analysis.get("year", "연도미상")
-    main_thesis = analysis.get("main_thesis", "")[:200]
-    gaps = analysis.get("research_gaps", [])
-    warnings = analysis.get("uncertainty_notes", [])
-    footnotes = analysis.get("footnotes", [])
-
-    summary_parts = [
-        f"📚 분석 완료: {title} ({authors}, {year})",
-        f"핵심 주장: {main_thesis}",
-    ]
-
-    if footnotes:
-        summary_parts.append(f"각주 추출: {len(footnotes)}개의 원문 인용 추출 완료")
-
-    if gaps:
-        summary_parts.append(f"연구사 공백: {gaps[0][:100]}")
-
-    if warnings:
-        summary_parts.append(f"⚠️ 주의: {len(warnings)}개 항목 원본 확인 필요")
-
-    if obsidian_result:
-        summary_parts.append(obsidian_result)
-
-    return "\n\n".join(summary_parts)
-
-
-# ─── 각주 생성 도우미 ────────────────────────────────────────────────────────
+# ─── 각주 생성 ───────────────────────────────────────────────────────────────
 
 def generate_footnote(file_path: str, page: int, quote_hint: str) -> str:
     """
     특정 파일의 특정 페이지에서 인용문을 찾아 각주 형식으로 반환합니다.
-    quote_hint: 찾을 문장의 키워드나 일부
+    Claude가 가능하면 지능적으로 검색, 불가능하면 키워드 매칭 폴백.
     """
     try:
         doc = extract_document(file_path)
@@ -229,11 +273,29 @@ def generate_footnote(file_path: str, page: int, quote_hint: str) -> str:
         return f"❌ p.{page}를 찾을 수 없습니다. 총 {doc.total_pages}페이지."
 
     page_content = target_pages[0]
-    text = page_content.text
 
-    # 힌트로 관련 문장 찾기
-    sentences = re.split(r'(?<=[.!?。])\s+', text)
-    matches = [s for s in sentences if any(word in s for word in quote_hint.split())]
+    # Claude로 지능적 각주 추출 시도
+    if _claude_available():
+        try:
+            from core.claude_client import extract_footnote_with_claude
+            return extract_footnote_with_claude(
+                page_text=page_content.text,
+                page_number=page,
+                quote_hint=quote_hint,
+                file_path=file_path,
+                is_uncertain=page_content.is_uncertain,
+            )
+        except Exception as e:
+            print(f"[Research] Claude 각주 추출 실패, 키워드 검색으로 폴백: {e}")
+
+    # 키워드 매칭 폴백
+    return _keyword_footnote_search(page_content, page, quote_hint)
+
+
+def _keyword_footnote_search(page_content, page: int, quote_hint: str) -> str:
+    """키워드 기반 각주 검색 (Claude 없을 때 폴백)"""
+    sentences = re.split(r'(?<=[.!?。])\s+', page_content.text)
+    matches = [s for s in sentences if any(w in s for w in quote_hint.split())]
 
     if not matches:
         if page_content.is_uncertain:
@@ -243,56 +305,160 @@ def generate_footnote(file_path: str, page: int, quote_hint: str) -> str:
             )
         return f"p.{page}에서 '{quote_hint}' 관련 문장을 찾지 못했습니다."
 
-    best_match = max(matches, key=len)
-    uncertain_note = ""
-    if page_content.is_uncertain:
-        uncertain_note = " ⚠️[원본 확인 필요]"
-
-    return f'각주: "{best_match.strip()}" (p.{page}){uncertain_note}'
+    best = max(matches, key=len)
+    uncertain = " ⚠️[원본 확인 필요]" if page_content.is_uncertain else ""
+    return f'각주: "{best.strip()}" (p.{page}){uncertain}'
 
 
-# ─── 연구사 공백 분석 래퍼 ──────────────────────────────────────────────────
+# ─── 연구사 공백 종합 분석 (Claude 주도) ────────────────────────────────────
 
 def find_research_gaps() -> str:
-    """저장된 모든 논문을 바탕으로 연구사 공백을 분석합니다."""
-    return analyze_research_landscape()
+    """
+    저장된 모든 논문을 바탕으로 연구사 공백을 분석합니다.
+    Claude가 가능하면 지식 그래프를 종합 추론, 불가능하면 기본 통계 분석.
+    """
+    # 기본 통계 분석 (항상 실행)
+    base_analysis = analyze_research_landscape()
+
+    if not _claude_available():
+        return base_analysis
+
+    # Claude 심층 종합 분석
+    vault = get_vault_path()
+    if not vault:
+        return base_analysis
+
+    graph_path = vault / "역사학연구" / ".knowledge_graph.json"
+    if not graph_path.exists():
+        return base_analysis
+
+    try:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        papers = [
+            {"title": k, **v}
+            for k, v in graph.get("nodes", {}).items()
+            if v.get("type") == "paper"
+        ]
+        if not papers:
+            return base_analysis
+
+        from core.claude_client import synthesize_research_gaps_with_claude
+        claude_synthesis = synthesize_research_gaps_with_claude(papers)
+
+        # Claude 결과를 Obsidian에도 저장
+        if vault:
+            synthesis_path = vault / "역사학연구" / "Claude_연구사종합.md"
+            synthesis_path.write_text(
+                f"# Claude AI 연구사 종합 분석\n\n{claude_synthesis}\n\n---\n\n{base_analysis}",
+                encoding="utf-8"
+            )
+
+        return f"## Claude 연구사 종합 분석\n\n{claude_synthesis}\n\n---\n\n{base_analysis}"
+
+    except Exception as e:
+        return f"⚠️ Claude 종합 분석 실패 ({e})\n\n{base_analysis}"
+
+
+# ─── 응답 포맷 ───────────────────────────────────────────────────────────────
+
+def _format_voice_summary(analysis: dict, obsidian_result: str, ai_used: str) -> str:
+    """음성 비서 응답용 요약 포맷"""
+    title = analysis.get("title", "제목미상")
+    authors = ", ".join(analysis.get("authors", ["저자미상"]))
+    year = analysis.get("year", "연도미상")
+    main_thesis = analysis.get("main_thesis", "")[:200]
+    gaps = analysis.get("research_gaps", [])
+    warnings = analysis.get("uncertainty_notes", [])
+    footnotes = analysis.get("footnotes", [])
+
+    parts = [
+        f"📚 분석 완료 [{ai_used}]: {title} ({authors}, {year})",
+        f"핵심 주장: {main_thesis}",
+    ]
+
+    if footnotes:
+        certain = sum(1 for f in footnotes if not f.get("uncertain"))
+        uncertain = len(footnotes) - certain
+        fn_note = f"{len(footnotes)}개 추출"
+        if uncertain:
+            fn_note += f" (이 중 {uncertain}개 ⚠️ 원본 확인 필요)"
+        parts.append(f"각주 후보: {fn_note}")
+
+    if gaps:
+        parts.append(f"연구사 공백: {gaps[0][:120]}")
+
+    if warnings:
+        parts.append(f"⚠️ {len(warnings)}개 항목 원본 확인 필요")
+
+    if obsidian_result:
+        parts.append(obsidian_result)
+
+    return "\n\n".join(parts)
+
+
+def _fallback_analysis(doc: ExtractedDocument, error_msg: str) -> dict:
+    return {
+        "title": doc.title,
+        "authors": ["⚠️ 확인 필요"],
+        "year": "⚠️ 확인 필요",
+        "journal": "⚠️ 확인 필요",
+        "main_thesis": f"⚠️ AI 분석 실패 — 원본 확인 필요. 오류: {error_msg[:200]}",
+        "key_arguments": [], "methodology": "⚠️ 확인 필요",
+        "primary_sources": [], "footnotes": [],
+        "keywords": [], "related_works": [], "research_gaps": [],
+        "liner_highlights": [],
+        "uncertainty_notes": [f"AI 분석 오류: {error_msg[:300]}"],
+        "file_path": doc.file_path,
+        "file_type": doc.file_type,
+    }
 
 
 # ─── 메인 액션 진입점 (main.py에서 호출) ─────────────────────────────────────
 
-def history_research_action(command: str, parameters: dict) -> str:
+def history_research_action(command: str, parameters: dict, player=None) -> str:
     """
-    음성 비서에서 호출되는 역사학 연구 액션 핸들러.
+    Gemini가 도구 호출 시 진입하는 핸들러.
 
     지원 명령:
-      analyze_document    - 문서 분석 및 옵시디안 저장
-      find_research_gaps  - 연구사 공백 분석
-      generate_footnote   - 특정 페이지 각주 생성
-      set_vault_path      - 옵시디안 볼트 경로 설정
+      analyze_document       - 로컬 파일 → Claude 분석 → Obsidian
+      analyze_url            - 웹 URL → Liner → Claude → Obsidian
+      find_research_gaps     - Claude 기반 연구사 공백 종합 분석
+      generate_footnote      - Claude 기반 각주 생성
+      set_vault_path         - Obsidian 볼트 경로 설정
     """
     from .obsidian_bridge import set_vault_path
 
     if command == "analyze_document":
-        file_path = parameters.get("file_path", "")
-        if not file_path:
+        fp = parameters.get("file_path", "")
+        if not fp:
             return "❌ 파일 경로가 필요합니다."
-        save = parameters.get("save_to_obsidian", True)
-        return analyze_document(file_path, save_to_obsidian=save)
+        return analyze_document(fp, parameters.get("save_to_obsidian", True), player=player)
+
+    elif command == "analyze_url":
+        url = parameters.get("url", "")
+        if not url:
+            return "❌ URL이 필요합니다."
+        return analyze_url_with_liner_and_claude(
+            url=url,
+            question=parameters.get("question", ""),
+            save_to_obsidian=parameters.get("save_to_obsidian", True),
+            player=player,
+        )
 
     elif command == "find_research_gaps":
         return find_research_gaps()
 
     elif command == "generate_footnote":
-        file_path = parameters.get("file_path", "")
+        fp = parameters.get("file_path", "")
         page = int(parameters.get("page", 1))
-        quote_hint = parameters.get("quote_hint", "")
-        return generate_footnote(file_path, page, quote_hint)
+        hint = parameters.get("quote_hint", "")
+        return generate_footnote(fp, page, hint)
 
     elif command == "set_vault_path":
-        vault_path = parameters.get("vault_path", "")
-        if not vault_path:
+        vp = parameters.get("vault_path", "")
+        if not vp:
             return "❌ 볼트 경로가 필요합니다."
-        return set_vault_path(vault_path)
+        return set_vault_path(vp)
 
     else:
         return f"❌ 알 수 없는 명령: {command}"

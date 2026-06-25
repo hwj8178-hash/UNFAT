@@ -26,6 +26,10 @@ win10toast; sys_platform == "win32"
 pywinauto; sys_platform == "win32"
 qrcode[pil]
 
+# ── 멀티 AI 연동 ─────────────────────────────────────────────────────────────
+# Claude AI (Anthropic) — 논문 심층 분석, 각주, 연구사 정리
+anthropic
+
 # ── 역사학 연구 특화 의존성 ──────────────────────────────────────────────────
 # PDF 페이지별 텍스트 추출 (각주 페이지 번호 지원)
 pdfplumber
