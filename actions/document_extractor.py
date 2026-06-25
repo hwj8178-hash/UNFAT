@@ -1,11 +1,18 @@
 """
-document_extractor.py — 역사학 연구용 문서 텍스트 추출 엔진
+document_extractor.py — 역사학 연구용 문서 텍스트 추출 엔진 v2
 
 지원 형식:
   PDF    → 페이지별 텍스트 추출 (pdfplumber)
   HWP    → 한글 파일 텍스트 추출 (hwp5 / LibreOffice 변환)
   DOCX   → 워드 파일 텍스트 추출 (python-docx)
   JPG/PNG → OCR 텍스트 추출 (easyocr, 한국어 지원)
+
+v2 신기능:
+  - 목차(TOC) 자동 감지 및 파싱 → 장/절 구조 인식
+  - 페이지 → 장/절 역추적 (get_chapter_for_page)
+  - 미국 자료 날짜 자동 감지 (document_date)
+  - 언어 자동 감지 (ko/en/ja/zh)
+  - Claude 프롬프트용 구조화 텍스트 출력 (get_text_with_structure)
 """
 
 from __future__ import annotations
@@ -18,6 +25,8 @@ from pathlib import Path
 from typing import Optional
 
 
+# ─── 데이터 클래스 ────────────────────────────────────────────────────────────
+
 @dataclass
 class PageContent:
     """단일 페이지/섹션의 텍스트와 메타데이터"""
@@ -25,6 +34,19 @@ class PageContent:
     text: str
     is_uncertain: bool = False
     uncertainty_reason: str = ""
+
+
+@dataclass
+class TocEntry:
+    """목차 항목 — 장/절/소절 계층 구조"""
+    level: int           # 1=편/부, 2=장, 3=절, 4=소절
+    number: str          # "제1장", "1", "1.1", "Chapter 1" 등
+    title: str           # 섹션 제목
+    page_number: int     # 시작 페이지 번호 (-1 = 불명확)
+
+    def full_label(self) -> str:
+        """표시용 전체 라벨"""
+        return f"{self.number} {self.title}".strip()
 
 
 @dataclass
@@ -37,14 +59,93 @@ class ExtractedDocument:
     total_pages: int = 0
     extraction_warnings: list[str] = field(default_factory=list)
 
+    # v2: 구조 정보
+    toc: list[TocEntry] = field(default_factory=list)
+    document_date: str = ""          # "1945-03-15" 형식 (미국 자료 등)
+    document_language: str = ""      # "ko", "en", "ja", "zh", "mixed"
+
+    # ── 기본 텍스트 프로퍼티 ──────────────────────────────────────────────────
+
     @property
     def full_text(self) -> str:
         return "\n\n".join(p.text for p in self.pages if p.text.strip())
 
     @property
     def total_chars(self) -> int:
-        """추출된 전체 텍스트의 총 글자 수"""
         return sum(len(p.text) for p in self.pages)
+
+    @property
+    def first_pages_text(self) -> str:
+        """처음 12페이지 텍스트 (서지정보·날짜·목차 감지용)"""
+        return "\n\n".join(
+            f"[p.{p.page_number}]\n{p.text}"
+            for p in self.pages[:12] if p.text.strip()
+        )
+
+    @property
+    def toc_text(self) -> str:
+        """목차 텍스트 표현 (Claude 프롬프트 삽입용)"""
+        if not self.toc:
+            return ""
+        lines = ["[문서 목차 / Table of Contents]"]
+        for entry in self.toc:
+            indent = "  " * (entry.level - 1)
+            page_str = f" ··· p.{entry.page_number}" if entry.page_number > 0 else ""
+            lines.append(f"{indent}{entry.full_label()}{page_str}")
+        return "\n".join(lines)
+
+    # ── 구조 검색 메서드 ─────────────────────────────────────────────────────
+
+    def get_chapter_for_page(self, page_num: int) -> dict:
+        """
+        페이지 번호에 해당하는 장/절/소절 정보를 반환합니다.
+        TOC가 없으면 빈 dict 반환.
+
+        Returns:
+            {"part": "제1편 ...", "chapter": "제2장 ...", "section": "제3절 ..."}
+        """
+        if not self.toc:
+            return {}
+
+        result: dict[str, str] = {}
+        sorted_toc = sorted(self.toc, key=lambda e: (e.page_number, e.level))
+
+        for entry in sorted_toc:
+            if entry.page_number < 0:
+                continue
+            if entry.page_number > page_num:
+                break
+            label = entry.full_label()
+            if entry.level == 1:
+                result["part"] = label
+                result.pop("chapter", None)
+                result.pop("section", None)
+                result.pop("subsection", None)
+            elif entry.level == 2:
+                result["chapter"] = label
+                result.pop("section", None)
+                result.pop("subsection", None)
+            elif entry.level == 3:
+                result["section"] = label
+                result.pop("subsection", None)
+            elif entry.level == 4:
+                result["subsection"] = label
+
+        return result
+
+    def get_location_string(self, page_num: int) -> str:
+        """
+        "제2장 상업 발달 > 제1절 시장 구조 > p.45" 형식의 위치 문자열 반환
+        """
+        loc = self.get_chapter_for_page(page_num)
+        parts = []
+        for key in ("part", "chapter", "section", "subsection"):
+            if key in loc:
+                parts.append(loc[key])
+        parts.append(f"p.{page_num}")
+        return " > ".join(parts)
+
+    # ── 텍스트 출력 메서드 ────────────────────────────────────────────────────
 
     def get_text_with_pages(self) -> str:
         """각주 작성에 사용할 페이지 번호 포함 텍스트"""
@@ -57,14 +158,61 @@ class ExtractedDocument:
                 parts.append(f"{marker}\n{p.text}")
         return "\n\n".join(parts)
 
+    def get_text_with_structure(self) -> str:
+        """
+        목차·장절 정보가 포함된 구조화 텍스트 (Claude 심층 분석용).
+        각 페이지 앞에 [장/절] 헤더를 삽입합니다.
+        """
+        result_parts = []
+
+        # 1. 목차 삽입
+        if self.toc_text:
+            result_parts.append(self.toc_text)
+            result_parts.append("")
+
+        # 2. 날짜 및 언어 정보
+        meta = []
+        if self.document_date:
+            meta.append(f"[문서 날짜: {self.document_date}]")
+        if self.document_language:
+            lang_names = {"ko": "한국어", "en": "영어", "ja": "일본어", "zh": "중국어", "mixed": "복수언어"}
+            meta.append(f"[언어: {lang_names.get(self.document_language, self.document_language)}]")
+        if meta:
+            result_parts.extend(meta)
+            result_parts.append("")
+
+        # 3. 페이지별 텍스트 + 장절 헤더
+        prev_location = ""
+        for p in self.pages:
+            if not p.text.strip():
+                continue
+
+            # 이전 페이지와 다른 장/절에 진입하면 헤더 삽입
+            if self.toc:
+                loc = self.get_chapter_for_page(p.page_number)
+                loc_str = " > ".join(
+                    loc[k] for k in ("part", "chapter", "section", "subsection") if k in loc
+                )
+                if loc_str and loc_str != prev_location:
+                    result_parts.append(f"\n{'─'*60}")
+                    result_parts.append(f"[{loc_str}]")
+                    prev_location = loc_str
+
+            marker = f"[p.{p.page_number}]"
+            if p.is_uncertain:
+                marker += f" ⚠️[불확실: {p.uncertainty_reason}]"
+            result_parts.append(f"{marker}\n{p.text}")
+
+        return "\n\n".join(result_parts)
+
     def get_page_chunks(
         self, chunk_chars: int = 130_000, overlap_chars: int = 8_000
     ) -> list[str]:
         """
         대용량 문서를 위한 청크 단위 텍스트 분할.
-        각 청크는 [p.N] 경계를 존중하며, 문맥 유지를 위해 overlap_chars만큼 중첩합니다.
+        각 청크는 [p.N] 경계를 존중하며, overlap_chars만큼 중첩합니다.
         """
-        full = self.get_text_with_pages()
+        full = self.get_text_with_structure() if self.toc else self.get_text_with_pages()
         if len(full) <= chunk_chars:
             return [full]
 
@@ -96,10 +244,12 @@ class ExtractedDocument:
         return chunks
 
 
+# ─── 공개 진입점 ─────────────────────────────────────────────────────────────
+
 def extract_document(file_path: str) -> ExtractedDocument:
     """
     파일 경로를 받아 ExtractedDocument를 반환합니다.
-    파일 형식을 자동으로 감지하여 적절한 추출기를 사용합니다.
+    파일 형식을 자동으로 감지하고, 추출 후 목차·날짜·언어를 자동 감지합니다.
     """
     path = Path(file_path)
     if not path.exists():
@@ -107,18 +257,271 @@ def extract_document(file_path: str) -> ExtractedDocument:
 
     ext = path.suffix.lower()
     if ext == ".pdf":
-        return _extract_pdf(path)
+        doc = _extract_pdf(path)
     elif ext in (".hwp", ".hwpx"):
-        return _extract_hwp(path)
+        doc = _extract_hwp(path)
     elif ext in (".docx", ".doc"):
-        return _extract_docx(path)
+        doc = _extract_docx(path)
     elif ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
-        return _extract_image(path)
+        doc = _extract_image(path)
     else:
         raise ValueError(f"지원하지 않는 파일 형식입니다: {ext}")
 
+    # 후처리: 구조 분석
+    _post_process(doc)
+    return doc
 
-# ─── PDF 추출 ────────────────────────────────────────────────────────────────
+
+# ─── 후처리: 목차·날짜·언어 감지 ─────────────────────────────────────────────
+
+def _post_process(doc: ExtractedDocument) -> None:
+    """추출 완료 후 목차, 날짜, 언어를 감지합니다."""
+    if not doc.pages:
+        return
+
+    # 언어 감지 (처음 3000자 기준)
+    sample = " ".join(p.text for p in doc.pages[:5])[:3000]
+    doc.document_language = _detect_language(sample)
+
+    # 날짜 감지 (처음 5페이지)
+    first_text = " ".join(p.text for p in doc.pages[:5])
+    doc.document_date = _detect_document_date(first_text)
+
+    # 목차 감지 (처음 20페이지 내)
+    toc = _detect_and_parse_toc(doc.pages[:20])
+    if toc:
+        doc.toc = toc
+        print(f"[DocExtract] 목차 감지: {len(toc)}개 항목")
+    else:
+        print("[DocExtract] 목차 미감지 — Claude가 구조 추론")
+
+
+def _detect_language(text: str) -> str:
+    """텍스트에서 주 언어를 감지합니다."""
+    if not text:
+        return ""
+
+    korean = len(re.findall(r'[가-힣]', text))
+    japanese = len(re.findall(r'[぀-ゟ゠-ヿ]', text))
+    chinese = len(re.findall(r'[一-鿿]', text))
+    latin = len(re.findall(r'[a-zA-Z]', text))
+
+    total = max(korean + japanese + chinese + latin, 1)
+
+    if korean / total > 0.3:
+        return "ko"
+    elif japanese / total > 0.3:
+        return "ja"
+    elif chinese / total > 0.3:
+        return "zh"
+    elif latin / total > 0.3:
+        return "en"
+    return "mixed"
+
+
+def _detect_document_date(text: str) -> str:
+    """
+    텍스트에서 날짜를 감지합니다.
+    미국 신문·정부문서 형식 우선 지원.
+
+    Returns: "YYYY-MM-DD", "YYYY-MM", "YYYY" 또는 ""
+    """
+    MONTH_NAMES = {
+        "january": "01", "february": "02", "march": "03",
+        "april": "04", "may": "05", "june": "06",
+        "july": "07", "august": "08", "september": "09",
+        "october": "10", "november": "11", "december": "12",
+        "jan": "01", "feb": "02", "mar": "03", "apr": "04",
+        "jun": "06", "jul": "07", "aug": "08", "sep": "09",
+        "oct": "10", "nov": "11", "dec": "12",
+    }
+
+    patterns = [
+        # "March 15, 1945" / "March 15 1945"
+        (r'\b(January|February|March|April|May|June|July|August|September|October|November|December'
+         r'|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2}),?\s+(\d{4})\b',
+         lambda m: f"{m.group(3)}-{MONTH_NAMES[m.group(1).lower()[:3]]}-{int(m.group(2)):02d}"),
+
+        # "15 March 1945" / "15 March, 1945"
+        (r'\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December'
+         r'|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?,?\s+(\d{4})\b',
+         lambda m: f"{m.group(3)}-{MONTH_NAMES[m.group(2).lower()[:3]]}-{int(m.group(1)):02d}"),
+
+        # "1945년 3월 15일"
+        (r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일',
+         lambda m: f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"),
+
+        # "1945년 3월"
+        (r'(\d{4})년\s*(\d{1,2})월(?!\s*\d)',
+         lambda m: f"{m.group(1)}-{int(m.group(2)):02d}"),
+
+        # "YYYY-MM-DD" or "YYYY/MM/DD"
+        (r'\b(\d{4})[-/](\d{2})[-/](\d{2})\b',
+         lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)}"),
+
+        # "MM/DD/YYYY" or "MM-DD-YYYY" (US format)
+        (r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b',
+         lambda m: f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"),
+
+        # Standalone year near document header keywords
+        (r'(?:dated?|date:|published?:?|issued?:?)\s*[,:]?\s*(\d{4})',
+         lambda m: m.group(1)),
+
+        # "Volume ... 1945" — year only
+        (r'\b(1[0-9]{3}|20[0-2][0-9])\b',
+         lambda m: m.group(1)),
+    ]
+
+    for pattern, formatter in patterns:
+        match = re.search(pattern, text[:3000], re.IGNORECASE)
+        if match:
+            try:
+                result = formatter(match)
+                # Sanity check: year should be 1000-2100
+                year = int(result[:4])
+                if 1000 <= year <= 2100:
+                    return result
+            except Exception:
+                continue
+    return ""
+
+
+# ─── 목차 감지 및 파싱 ───────────────────────────────────────────────────────
+
+# 목차 헤더 감지 패턴
+_TOC_HEADER_RE = re.compile(
+    r'^\s*(목\s*차|차\s*례|목\s*록|목\s*차\s*표|'
+    r'Contents?|Table\s+of\s+Contents|CONTENTS|INDEX)\s*$',
+    re.IGNORECASE | re.MULTILINE
+)
+
+# 한국어 목차 항목 패턴: "제2장 경제 변동 ····· 45" 또는 "2.1 경제 변동 ····· 45"
+_TOC_KO_RE = re.compile(
+    r'^[ \t]*(제?\s*\d+\s*[편부장절항목](?:\s*\d+[절항목])?'
+    r'|\d{1,2}(?:\.\d{1,2}){0,3}\.?'
+    r'|[가나다라마바사아자차카타파하]\.'
+    r'|[IVXivx]{1,6}\.?)'
+    r'[ \t]+([^\d\n]{1,60}?)'
+    r'[ \t]*[·.…·\-]{0,30}[ \t]*'
+    r'(\d{1,4})[ \t]*$',
+    re.MULTILINE
+)
+
+# 영어 목차 항목 패턴: "Chapter 2. Economic Change ......... 45"
+_TOC_EN_RE = re.compile(
+    r'^[ \t]*(Chapter\s+\d+|Part\s+\d+|Section\s+\d+(?:\.\d+)?'
+    r'|\d{1,2}(?:\.\d{1,2}){0,3}\.?'
+    r'|[IVXivx]{1,6}\.?)'
+    r'[ \t]*[.:]?[ \t]+'
+    r'([^\d\n]{1,80}?)'
+    r'[ \t]*[.…\-]{0,30}[ \t]*'
+    r'(\d{1,4})[ \t]*$',
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def _detect_and_parse_toc(pages: list[PageContent]) -> list[TocEntry]:
+    """
+    페이지 목록에서 목차를 감지하고 파싱합니다.
+
+    전략:
+    1. 목차 헤더('목차', 'Contents' 등)가 있는 페이지 찾기
+    2. 해당 페이지 + 다음 2페이지에서 목차 항목 추출
+    3. 실패 시 전체 처음 10페이지에서 패턴 매칭으로 시도
+    """
+    # 전략 1: 목차 헤더 페이지 기반
+    toc_page_indices = [
+        i for i, p in enumerate(pages)
+        if _TOC_HEADER_RE.search(p.text)
+    ]
+
+    if toc_page_indices:
+        toc_text_parts = []
+        for idx in toc_page_indices:
+            for j in range(idx, min(idx + 4, len(pages))):
+                toc_text_parts.append(pages[j].text)
+        combined = "\n".join(toc_text_parts)
+        entries = _extract_toc_entries(combined)
+        if len(entries) >= 3:
+            return entries
+
+    # 전략 2: 처음 10페이지 전체에서 패턴 매칭
+    early_text = "\n".join(p.text for p in pages[:10])
+    entries = _extract_toc_entries(early_text)
+
+    # 품질 기준: 최소 3개 이상 페이지 번호가 있는 항목
+    valid = [e for e in entries if e.page_number > 0]
+    if len(valid) >= 3:
+        return valid
+
+    return []
+
+
+def _extract_toc_entries(text: str) -> list[TocEntry]:
+    """텍스트에서 목차 항목을 추출합니다."""
+    entries: list[TocEntry] = []
+    seen: set[str] = set()
+
+    def _add(number: str, title: str, page: int):
+        key = f"{number}|{title[:20]}"
+        if key in seen:
+            return
+        seen.add(key)
+        level = _guess_toc_level(number)
+        entries.append(TocEntry(
+            level=level,
+            number=number.strip(),
+            title=title.strip(),
+            page_number=page,
+        ))
+
+    # 한국어 패턴 우선
+    for m in _TOC_KO_RE.finditer(text):
+        number = m.group(1).strip()
+        title  = m.group(2).strip()
+        page   = int(m.group(3))
+        if title and 1 <= page <= 9999:
+            _add(number, title, page)
+
+    # 영어 패턴 (한국어 미감지 또는 보완)
+    if len(entries) < 3:
+        for m in _TOC_EN_RE.finditer(text):
+            number = m.group(1).strip()
+            title  = m.group(2).strip()
+            page   = int(m.group(3))
+            if title and 1 <= page <= 9999:
+                _add(number, title, page)
+
+    return entries
+
+
+def _guess_toc_level(number: str) -> int:
+    """번호 형식으로 목차 레벨 추정"""
+    num = number.strip()
+
+    # 명시적 레벨 키워드
+    if re.search(r'편|部|part', num, re.IGNORECASE):
+        return 1
+    if re.search(r'^제?\s*\d+\s*장$|^chapter\s*\d+$', num, re.IGNORECASE):
+        return 2
+    if re.search(r'^제?\s*\d+\s*절$|^section\s*\d+$', num, re.IGNORECASE):
+        return 3
+    if re.search(r'^제?\s*\d+\s*[항목]$', num):
+        return 4
+
+    # 숫자 계층 기반
+    dots = num.count('.')
+    if dots == 0:
+        return 2 if re.match(r'^\d+$', num) else 1
+    elif dots == 1:
+        return 3
+    else:
+        return 4
+
+    return 2
+
+
+# ─── PDF 추출 ─────────────────────────────────────────────────────────────────
 
 def _extract_pdf(path: Path) -> ExtractedDocument:
     try:
@@ -140,11 +543,9 @@ def _extract_pdf(path: Path) -> ExtractedDocument:
                 is_uncertain = False
                 reason = ""
 
-                # 텍스트가 너무 짧으면 스캔 이미지일 가능성
                 if len(text.strip()) < 50 and page.images:
                     is_uncertain = True
                     reason = "스캔 이미지로 보임 — OCR 필요"
-                    # 이미지 OCR 시도
                     ocr_text = _ocr_pdf_page_image(page)
                     if ocr_text:
                         text = ocr_text
@@ -154,7 +555,6 @@ def _extract_pdf(path: Path) -> ExtractedDocument:
                             f"p.{i}: 텍스트 추출 불완전 — 원본 확인 필요"
                         )
 
-                # 인코딩 오류 감지
                 if "?" * 3 in text or "□" * 3 in text:
                     is_uncertain = True
                     reason = "인코딩 오류 의심"
@@ -190,7 +590,7 @@ def _ocr_pdf_page_image(page) -> str:
         return ""
 
 
-# ─── HWP 추출 ────────────────────────────────────────────────────────────────
+# ─── HWP 추출 ─────────────────────────────────────────────────────────────────
 
 def _extract_hwp(path: Path) -> ExtractedDocument:
     doc = ExtractedDocument(
@@ -199,26 +599,21 @@ def _extract_hwp(path: Path) -> ExtractedDocument:
         title=path.stem,
     )
 
-    # 방법 1: hwp5txt 커맨드라인 도구 사용
     text = _hwp_via_hwp5txt(path)
-
-    # 방법 2: LibreOffice로 DOCX 변환 후 추출
     if not text:
         text = _hwp_via_libreoffice(path, doc)
 
     if not text:
         doc.extraction_warnings.append(
-            "HWP 파일 추출 실패 — hwp5txt 또는 LibreOffice 설치 필요. 원본 파일 직접 확인 필요."
+            "HWP 파일 추출 실패 — hwp5txt 또는 LibreOffice 설치 필요."
         )
         doc.pages.append(PageContent(
-            page_number=1,
-            text="",
+            page_number=1, text="",
             is_uncertain=True,
             uncertainty_reason="HWP 추출 실패 — 원본 파일 직접 확인 필요",
         ))
         return doc
 
-    # HWP는 페이지 경계를 정확히 알기 어려우므로 섹션으로 분할
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunk_size = max(1, len(paragraphs) // max(1, _estimate_pages(text)))
     for i, chunk_start in enumerate(range(0, len(paragraphs), chunk_size), start=1):
@@ -239,7 +634,6 @@ def _extract_hwp(path: Path) -> ExtractedDocument:
 
 
 def _hwp_via_hwp5txt(path: Path) -> str:
-    """hwp5txt CLI로 HWP 텍스트 추출"""
     try:
         result = subprocess.run(
             ["hwp5txt", str(path)],
@@ -253,7 +647,6 @@ def _hwp_via_hwp5txt(path: Path) -> str:
 
 
 def _hwp_via_libreoffice(path: Path, doc: ExtractedDocument) -> str:
-    """LibreOffice로 DOCX 변환 후 텍스트 추출"""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = subprocess.run(
@@ -271,7 +664,7 @@ def _hwp_via_libreoffice(path: Path, doc: ExtractedDocument) -> str:
         return ""
 
 
-# ─── DOCX 추출 ───────────────────────────────────────────────────────────────
+# ─── DOCX 추출 ────────────────────────────────────────────────────────────────
 
 def _extract_docx(path: Path) -> ExtractedDocument:
     doc = ExtractedDocument(
@@ -288,14 +681,12 @@ def _extract_docx(path: Path) -> ExtractedDocument:
         ))
         return doc
 
-    # DOCX는 페이지 경계 감지가 어려움 — 섹션 나누기
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
     chunk_size = max(10, len(paragraphs) // max(1, _estimate_pages(text)))
     for i, start in enumerate(range(0, len(paragraphs), chunk_size), start=1):
         chunk = "\n".join(paragraphs[start:start + chunk_size])
         doc.pages.append(PageContent(
-            page_number=i,
-            text=chunk,
+            page_number=i, text=chunk,
             is_uncertain=True,
             uncertainty_reason="DOCX 페이지 번호 추정값 — 원본 확인 권장",
         ))
@@ -316,7 +707,7 @@ def _extract_docx_text(path: Path) -> str:
         return ""
 
 
-# ─── 이미지 OCR 추출 ─────────────────────────────────────────────────────────
+# ─── 이미지 OCR 추출 ──────────────────────────────────────────────────────────
 
 _ocr_reader = None
 
@@ -324,7 +715,6 @@ def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
         import easyocr
-        # 한국어 + 영어 지원
         _ocr_reader = easyocr.Reader(["ko", "en"], gpu=False)
     return _ocr_reader
 

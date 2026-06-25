@@ -1,14 +1,17 @@
 """
-history_researcher.py — 역사학 연구 분석 핵심 모듈 (멀티 AI 파이프라인)
+history_researcher.py — 역사학 연구 분석 핵심 모듈 v2 (멀티 AI 파이프라인)
 
 AI 역할 분담:
   Gemini  → 음성 인식 + 명령 처리 + 컴퓨터 제어 (main.py)
   Claude  → 로컬 문서(PDF/HWP/DOCX/이미지) 심층 분석, 각주, 연구사 정리
   Liner   → 웹 URL 기반 자료 수집 및 AI 하이라이팅
 
-파이프라인:
-  로컬 파일 → document_extractor → Claude 분석 → Obsidian 저장
-  웹 URL    → Liner 웹앱 (브라우저 자동화) → Claude 병합 분석 → Obsidian 저장
+v2 신기능:
+  - 목차 기반 장/절/페이지 정확 출처 (제2장 3절 p.45)
+  - 미국 자료 날짜·기관·수신발신자·기밀등급 특화 추출
+  - document_type 자동 감지 및 유형별 음성 요약 포맷
+  - 각주에 chapter/section/location_string 귀속
+  - ExtractedDocument 구조 정보를 Claude 프롬프트에 전달
 """
 
 from __future__ import annotations
@@ -51,10 +54,15 @@ def analyze_document(
 ) -> str:
     """
     로컬 문서를 분석합니다.
-    1단계: document_extractor로 텍스트·페이지 번호 추출
-    2단계: Claude API로 심층 역사학 분석
+    1단계: document_extractor로 텍스트·페이지·목차·날짜 추출
+    2단계: Claude API로 심층 역사학 분석 (장/절 귀속 포함)
     3단계: Obsidian에 결과 저장
     """
+    def _log(msg: str):
+        print(f"[Research] {msg}")
+        if player and hasattr(player, "write_log"):
+            player.write_log(f"SYS: {msg}")
+
     # 1. 텍스트 추출
     try:
         doc = extract_document(file_path)
@@ -73,8 +81,16 @@ def analyze_document(
             f"⚠️ 자세한 확인이 필요합니다:\n{warnings}"
         )
 
+    # 구조 감지 결과 로그
+    if doc.toc:
+        _log(f"목차 감지: {len(doc.toc)}개 항목")
+    if doc.document_date:
+        _log(f"날짜 감지: {doc.document_date}")
+    if doc.document_language:
+        _log(f"언어 감지: {doc.document_language}")
+
     # 2. Claude 분석 시도 → 실패 시 Gemini 폴백
-    analysis, ai_used = _analyze_with_best_ai(doc)
+    analysis, ai_used = _analyze_with_best_ai(doc, _log)
 
     # 3. 추출 경고 병합
     if doc.extraction_warnings:
@@ -92,15 +108,23 @@ def analyze_document(
     return _format_voice_summary(analysis, obsidian_result, ai_used)
 
 
-def _analyze_with_best_ai(doc: ExtractedDocument) -> tuple[dict, str]:
+def _analyze_with_best_ai(doc: ExtractedDocument, log_fn=None) -> tuple[dict, str]:
     """
     Claude → Gemini 순서로 분석을 시도합니다.
     대용량 문서는 자동으로 청크 분할 후 종합합니다.
-    성공한 AI 이름도 함께 반환합니다.
+    v2: ExtractedDocument의 구조 정보(toc, date, language)를 전달합니다.
     """
-    text_with_pages = doc.get_text_with_pages()
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+        else:
+            print(f"[Research] {msg}")
+
     knowledge_context = get_knowledge_summary()
     is_large = doc.total_chars > 160_000
+
+    # v2: 구조화 텍스트 사용 (목차+장절 헤더 포함)
+    text_for_analysis = doc.get_text_with_structure()
 
     # Claude 우선 시도
     if _claude_available():
@@ -110,32 +134,50 @@ def _analyze_with_best_ai(doc: ExtractedDocument) -> tuple[dict, str]:
                 analyze_large_document_with_claude,
                 SINGLE_PASS_CHARS,
             )
+
+            common_kwargs = dict(
+                knowledge_context=knowledge_context,
+                first_pages_text=doc.first_pages_text,
+                document_date=doc.document_date,
+                document_language=doc.document_language,
+                toc_text=doc.toc_text,
+            )
+
             if is_large:
-                print(
-                    f"[Research] 대용량 문서 ({doc.total_chars:,}자) — 청킹 분석 시작"
-                )
+                _log(f"대용량 문서 ({doc.total_chars:,}자) — 청킹 분석 시작")
                 analysis = analyze_large_document_with_claude(
-                    text_with_pages=text_with_pages,
+                    text_with_pages=text_for_analysis,
                     file_path=doc.file_path,
-                    knowledge_context=knowledge_context,
+                    **common_kwargs,
                 )
                 ai_label = f"Claude (청크×{analysis.get('_chunk_count', '?')})"
             else:
                 analysis = analyze_document_with_claude(
-                    text_with_pages=text_with_pages,
+                    text_with_pages=text_for_analysis,
                     file_path=doc.file_path,
-                    knowledge_context=knowledge_context,
+                    **common_kwargs,
                 )
                 ai_label = "Claude"
+
             analysis["file_path"] = doc.file_path
             analysis["file_type"] = doc.file_type
+
+            # 목차 정보가 Claude 응답에 없으면 추출기 TOC 사용
+            if not analysis.get("toc") and doc.toc:
+                analysis["toc"] = [
+                    {"level": e.level, "number": e.number,
+                     "title": e.title, "page": e.page_number}
+                    for e in doc.toc
+                ]
+
             return analysis, ai_label
+
         except Exception as e:
-            print(f"[Research] Claude 분석 실패, Gemini로 폴백: {e}")
+            _log(f"Claude 분석 실패, Gemini로 폴백: {e}")
 
     # Gemini 폴백
     try:
-        analysis = _analyze_with_gemini(doc, text_with_pages, knowledge_context)
+        analysis = _analyze_with_gemini(doc, text_for_analysis, knowledge_context)
         return analysis, "Gemini"
     except Exception as e:
         return _fallback_analysis(doc, str(e)), "없음(오류)"
@@ -143,7 +185,7 @@ def _analyze_with_best_ai(doc: ExtractedDocument) -> tuple[dict, str]:
 
 def _analyze_with_gemini(
     doc: ExtractedDocument,
-    text_with_pages: str,
+    text_with_structure: str,
     knowledge_context: str,
 ) -> dict:
     """Gemini 폴백 분석 (Claude 사용 불가 시)"""
@@ -156,9 +198,9 @@ def _analyze_with_gemini(
     system_prompt = (
         "당신은 역사학 전문 연구 보조 AI입니다. "
         "학술 논문과 역사 자료를 분석하여 핵심 주장, 논거, 방법론, 사료, "
-        "연구 공백, 원문 각주(페이지 번호 필수)를 JSON으로 추출합니다."
+        "연구 공백, 원문 각주(페이지·장·절 번호 필수)를 JSON으로 추출합니다."
     )
-    user_prompt = _build_analysis_prompt(text_with_pages, doc.file_path, knowledge_context)
+    user_prompt = _build_gemini_prompt(text_with_structure, doc.file_path, knowledge_context, doc)
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -166,6 +208,8 @@ def _analyze_with_gemini(
         config={"system_instruction": system_prompt}
     )
     raw = response.text.strip()
+    raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'\s*```\s*$', '', raw, flags=re.MULTILINE)
     json_match = re.search(r'\{[\s\S]*\}', raw)
     result = json.loads(json_match.group() if json_match else raw)
     result["file_path"] = doc.file_path
@@ -173,8 +217,15 @@ def _analyze_with_gemini(
     return result
 
 
-def _build_analysis_prompt(text: str, file_path: str, knowledge_context: str) -> str:
+def _build_gemini_prompt(
+    text: str, file_path: str, knowledge_context: str, doc: ExtractedDocument
+) -> str:
+    toc_section = f"\n{doc.toc_text}\n" if doc.toc_text else ""
+    date_hint = f"\n감지된 날짜: {doc.document_date}" if doc.document_date else ""
+    lang_hint = f"\n언어: {doc.document_language}" if doc.document_language else ""
+
     return f"""다음 역사학 문서를 분석해주세요. [p.숫자]가 페이지 번호입니다. ⚠️는 불확실 구간입니다.
+{date_hint}{lang_hint}{toc_section}
 
 {knowledge_context}
 
@@ -186,12 +237,29 @@ JSON으로만 응답:
   "title": "제목",
   "authors": ["저자"],
   "year": "연도",
-  "journal": "학술지",
+  "document_date": "날짜 (YYYY-MM-DD, 미국 자료 우선)",
+  "document_type": "academic_paper|monograph|newspaper_article|government_document|other",
+  "journal_or_source": "학술지명/신문명/기관명",
+  "publisher": "출판사",
+  "issuing_body": "발행기관 (미국 자료)",
+  "historical_period": "역사적 시기",
+  "geographical_scope": "지리적 범위",
   "main_thesis": "핵심 주장 2-3문장",
-  "key_arguments": ["논거1", "논거2"],
+  "key_arguments": ["논거1 (p.N 근거)", "논거2"],
+  "key_events": ["주요 사건 (날짜·장소 포함)"],
+  "key_persons": ["주요 인물 (직책 포함)"],
   "methodology": "방법론",
   "primary_sources": ["사료1"],
-  "footnotes": [{{"page": 번호, "text": "원문 그대로", "context": "맥락", "uncertain": false}}],
+  "toc": [{{"level": 레벨, "number": "제1장", "title": "제목", "page": 페이지}}],
+  "footnotes": [{{
+    "page": 번호,
+    "chapter": "제N장 제목",
+    "section": "제N절 제목",
+    "location_string": "제N장 > 제N절 > p.N",
+    "text": "원문 그대로",
+    "context": "맥락",
+    "uncertain": false
+  }}],
   "keywords": ["키워드"],
   "related_works": ["관련 연구"],
   "research_gaps": ["연구 공백"],
@@ -208,13 +276,7 @@ def analyze_url_with_liner_and_claude(
     save_to_obsidian: bool = True,
     player=None,
 ) -> str:
-    """
-    웹 URL 자료를 Liner로 수집한 뒤 Claude로 심층 분석합니다.
-
-    Liner: URL 저장 + AI 요약 + 하이라이트 추출
-    Claude: Liner 결과 기반 역사학적 심층 분석 + 각주 생성
-    """
-    # 1. Liner로 URL 분석
+    """웹 URL 자료를 Liner로 수집한 뒤 Claude로 심층 분석합니다."""
     from actions.liner_bridge import (
         analyze_url_with_liner, format_liner_context_for_claude,
         liner_result_to_analysis_dict
@@ -224,7 +286,6 @@ def analyze_url_with_liner_and_claude(
 
     if not liner_result.get("success"):
         err = liner_result.get("error", "알 수 없는 오류")
-        # Liner 실패 시 Liner를 수동으로 열고 Claude에게만 URL 정보 전달
         open_msg = ""
         try:
             from actions.liner_bridge import open_liner_for_manual_review
@@ -240,8 +301,6 @@ def analyze_url_with_liner_and_claude(
         )
 
     liner_context = format_liner_context_for_claude(liner_result)
-
-    # 2. Claude로 Liner 결과 심층 분석
     analysis = None
     ai_used = "Liner"
 
@@ -263,7 +322,6 @@ def analyze_url_with_liner_and_claude(
     if analysis is None:
         analysis = liner_result_to_analysis_dict(liner_result, question)
 
-    # 3. Obsidian 저장
     obsidian_result = ""
     if save_to_obsidian:
         try:
@@ -277,10 +335,7 @@ def analyze_url_with_liner_and_claude(
 # ─── 각주 생성 ───────────────────────────────────────────────────────────────
 
 def generate_footnote(file_path: str, page: int, quote_hint: str) -> str:
-    """
-    특정 파일의 특정 페이지에서 인용문을 찾아 각주 형식으로 반환합니다.
-    Claude가 가능하면 지능적으로 검색, 불가능하면 키워드 매칭 폴백.
-    """
+    """특정 파일의 특정 페이지에서 인용문을 찾아 각주 형식으로 반환합니다."""
     try:
         doc = extract_document(file_path)
     except Exception as e:
@@ -291,8 +346,9 @@ def generate_footnote(file_path: str, page: int, quote_hint: str) -> str:
         return f"❌ p.{page}를 찾을 수 없습니다. 총 {doc.total_pages}페이지."
 
     page_content = target_pages[0]
+    chapter_info = doc.get_chapter_for_page(page)
+    location_str = doc.get_location_string(page)
 
-    # Claude로 지능적 각주 추출 시도
     if _claude_available():
         try:
             from core.claude_client import extract_footnote_with_claude
@@ -302,15 +358,17 @@ def generate_footnote(file_path: str, page: int, quote_hint: str) -> str:
                 quote_hint=quote_hint,
                 file_path=file_path,
                 is_uncertain=page_content.is_uncertain,
+                chapter_info=chapter_info,
             )
         except Exception as e:
             print(f"[Research] Claude 각주 추출 실패, 키워드 검색으로 폴백: {e}")
 
-    # 키워드 매칭 폴백
-    return _keyword_footnote_search(page_content, page, quote_hint)
+    return _keyword_footnote_search(page_content, page, quote_hint, location_str)
 
 
-def _keyword_footnote_search(page_content, page: int, quote_hint: str) -> str:
+def _keyword_footnote_search(
+    page_content, page: int, quote_hint: str, location_str: str
+) -> str:
     """키워드 기반 각주 검색 (Claude 없을 때 폴백)"""
     sentences = re.split(r'(?<=[.!?。])\s+', page_content.text)
     matches = [s for s in sentences if any(w in s for w in quote_hint.split())]
@@ -318,30 +376,25 @@ def _keyword_footnote_search(page_content, page: int, quote_hint: str) -> str:
     if not matches:
         if page_content.is_uncertain:
             return (
-                f"⚠️ p.{page} 텍스트 추출 불확실 ({page_content.uncertainty_reason}). "
+                f"⚠️ {location_str} 텍스트 추출 불확실 ({page_content.uncertainty_reason}). "
                 f"원본 파일에서 직접 확인이 필요합니다."
             )
-        return f"p.{page}에서 '{quote_hint}' 관련 문장을 찾지 못했습니다."
+        return f"{location_str}에서 '{quote_hint}' 관련 문장을 찾지 못했습니다."
 
     best = max(matches, key=len)
     uncertain = " ⚠️[원본 확인 필요]" if page_content.is_uncertain else ""
-    return f'각주: "{best.strip()}" (p.{page}){uncertain}'
+    return f'각주: "{best.strip()}" ({location_str}){uncertain}'
 
 
-# ─── 연구사 공백 종합 분석 (Claude 주도) ────────────────────────────────────
+# ─── 연구사 공백 종합 분석 (Claude 주도) ─────────────────────────────────────
 
 def find_research_gaps() -> str:
-    """
-    저장된 모든 논문을 바탕으로 연구사 공백을 분석합니다.
-    Claude가 가능하면 지식 그래프를 종합 추론, 불가능하면 기본 통계 분석.
-    """
-    # 기본 통계 분석 (항상 실행)
+    """저장된 모든 논문을 바탕으로 연구사 공백을 분석합니다."""
     base_analysis = analyze_research_landscape()
 
     if not _claude_available():
         return base_analysis
 
-    # Claude 심층 종합 분석
     vault = get_vault_path()
     if not vault:
         return base_analysis
@@ -363,7 +416,6 @@ def find_research_gaps() -> str:
         from core.claude_client import synthesize_research_gaps_with_claude
         claude_synthesis = synthesize_research_gaps_with_claude(papers)
 
-        # Claude 결과를 Obsidian에도 저장
         if vault:
             synthesis_path = vault / "역사학연구" / "Claude_연구사종합.md"
             synthesis_path.write_text(
@@ -380,31 +432,161 @@ def find_research_gaps() -> str:
 # ─── 응답 포맷 ───────────────────────────────────────────────────────────────
 
 def _format_voice_summary(analysis: dict, obsidian_result: str, ai_used: str) -> str:
-    """음성 비서 응답용 요약 포맷"""
-    title = analysis.get("title", "제목미상")
-    authors = ", ".join(analysis.get("authors", ["저자미상"]))
-    year = analysis.get("year", "연도미상")
-    main_thesis = analysis.get("main_thesis", "")[:200]
-    gaps = analysis.get("research_gaps", [])
-    warnings = analysis.get("uncertainty_notes", [])
-    footnotes = analysis.get("footnotes", [])
+    """
+    음성 비서 응답용 요약 포맷 (v2: 문서 유형별 특화 출력)
+    """
+    title       = analysis.get("title", "제목미상")
+    subtitle    = analysis.get("subtitle", "")
+    authors     = ", ".join(analysis.get("authors", ["저자미상"]))
+    year        = analysis.get("year", "")
+    doc_date    = analysis.get("document_date", "")
+    doc_type    = analysis.get("document_type", "")
+    source      = analysis.get("journal_or_source", "")
+    publisher   = analysis.get("publisher", "")
+    pub_place   = analysis.get("publication_place", "")
+    issuing     = analysis.get("issuing_body", "")
+    recipients  = analysis.get("recipients", [])
+    senders     = analysis.get("senders", [])
+    classif     = analysis.get("classification", "")
+    hist_period = analysis.get("historical_period", "")
+    geo_scope   = analysis.get("geographical_scope", "")
+    main_thesis = analysis.get("main_thesis", "")[:300]
+    doc_struct  = analysis.get("document_structure", "")
+    key_events  = analysis.get("key_events", [])
+    key_persons = analysis.get("key_persons", [])
+    gaps        = analysis.get("research_gaps", [])
+    warnings    = analysis.get("uncertainty_notes", [])
+    footnotes   = analysis.get("footnotes", [])
+    toc         = analysis.get("toc", [])
 
-    parts = [
-        f"📚 분석 완료 [{ai_used}]: {title} ({authors}, {year})",
-        f"핵심 주장: {main_thesis}",
-    ]
+    parts: list[str] = []
 
+    # ── 헤더: 문서 유형에 따라 아이콘 구분 ──────────────────────────────────
+    TYPE_ICON = {
+        "academic_paper":       "📄",
+        "monograph":            "📚",
+        "newspaper_article":    "📰",
+        "government_document":  "🏛️",
+        "diplomatic_cable":     "📡",
+        "memorandum":           "📋",
+        "report":               "📊",
+        "letter":               "✉️",
+        "testimony":            "🗣️",
+    }
+    icon = TYPE_ICON.get(doc_type, "📁")
+    full_title = f"{title}{(' — ' + subtitle) if subtitle else ''}"
+    parts.append(f"{icon} 분석 완료 [{ai_used}]: {full_title}")
+
+    # ── 서지사항 블록 ────────────────────────────────────────────────────────
+    bib_parts: list[str] = []
+
+    if doc_date:
+        bib_parts.append(f"날짜: {_format_date_ko(doc_date)}")
+    elif year:
+        bib_parts.append(f"연도: {year}")
+
+    if doc_type:
+        TYPE_KO = {
+            "academic_paper": "학술논문", "monograph": "단행본",
+            "newspaper_article": "신문기사", "government_document": "정부문서",
+            "diplomatic_cable": "외교전문", "memorandum": "메모/각서",
+            "report": "보고서", "letter": "서한", "testimony": "증언",
+        }
+        bib_parts.append(f"유형: {TYPE_KO.get(doc_type, doc_type)}")
+
+    if authors and authors != "저자미상":
+        bib_parts.append(f"저자: {authors}")
+
+    if issuing:
+        bib_parts.append(f"발행: {issuing}")
+    elif source:
+        bib_parts.append(f"출처: {source}")
+    elif publisher:
+        bib_parts.append(f"출판: {publisher}")
+
+    if pub_place:
+        bib_parts.append(f"발행지: {pub_place}")
+
+    if senders:
+        bib_parts.append(f"발신: {', '.join(senders[:3])}")
+    if recipients:
+        bib_parts.append(f"수신: {', '.join(recipients[:3])}")
+    if classif:
+        bib_parts.append(f"기밀: {classif}")
+
+    if hist_period:
+        bib_parts.append(f"시기: {hist_period}")
+    if geo_scope:
+        bib_parts.append(f"지역: {geo_scope}")
+
+    if bib_parts:
+        parts.append(" | ".join(bib_parts))
+
+    # ── 문서 구조 (목차) ─────────────────────────────────────────────────────
+    if toc:
+        toc_lines = []
+        for entry in toc[:12]:  # 최대 12개만 표시
+            indent = "  " * (entry.get("level", 1) - 1)
+            num    = entry.get("number", "")
+            ttl    = entry.get("title", "")
+            pg     = entry.get("page", 0)
+            pg_str = f" → p.{pg}" if pg > 0 else ""
+            toc_lines.append(f"{indent}{num} {ttl}{pg_str}")
+        if toc_lines:
+            toc_str = "\n".join(toc_lines)
+            parts.append(f"목차 구조:\n{toc_str}")
+    elif doc_struct:
+        parts.append(f"구조: {doc_struct[:200]}")
+
+    # ── 핵심 내용 ────────────────────────────────────────────────────────────
+    if main_thesis:
+        parts.append(f"핵심 내용: {main_thesis}")
+
+    # ── 미국/영어 자료 특화: 주요 사건·인물 ──────────────────────────────────
+    if key_events:
+        events_str = " / ".join(str(e)[:80] for e in key_events[:4])
+        parts.append(f"주요 사건: {events_str}")
+    if key_persons:
+        persons_str = " / ".join(str(p)[:60] for p in key_persons[:5])
+        parts.append(f"주요 인물: {persons_str}")
+
+    # ── 각주 요약 (장/절 귀속 포함) ──────────────────────────────────────────
     if footnotes:
-        certain = sum(1 for f in footnotes if not f.get("uncertain"))
-        uncertain = len(footnotes) - certain
-        fn_note = f"{len(footnotes)}개 추출"
-        if uncertain:
-            fn_note += f" (이 중 {uncertain}개 ⚠️ 원본 확인 필요)"
-        parts.append(f"각주 후보: {fn_note}")
+        certain_fn   = [f for f in footnotes if not f.get("uncertain")]
+        uncertain_fn = [f for f in footnotes if f.get("uncertain")]
 
+        fn_count_str = f"{len(footnotes)}개 (확실 {len(certain_fn)}개"
+        if uncertain_fn:
+            fn_count_str += f", ⚠️ 확인필요 {len(uncertain_fn)}개"
+        fn_count_str += ")"
+        parts.append(f"인용 추출: {fn_count_str}")
+
+        # 장별 분포
+        chapter_dist: dict[str, int] = {}
+        for fn in footnotes:
+            ch = fn.get("chapter", "") or fn.get("section", "") or "미분류"
+            chapter_dist[ch] = chapter_dist.get(ch, 0) + 1
+        if len(chapter_dist) > 1:
+            dist_str = " / ".join(
+                f"{ch[:20]}: {cnt}개"
+                for ch, cnt in sorted(chapter_dist.items(), key=lambda x: -x[1])[:4]
+            )
+            parts.append(f"장별 분포: {dist_str}")
+
+        # 대표 각주 1개 (가장 긴 것)
+        if certain_fn:
+            best = max(certain_fn, key=lambda f: len(f.get("text", "")))
+            loc  = best.get("location_string", "") or f"p.{best.get('page', '?')}"
+            txt  = best.get("text", "")[:120]
+            parts.append(f'예시 인용: "{txt}" ({loc})')
+
+    # ── 연구사 공백 ──────────────────────────────────────────────────────────
     if gaps:
-        parts.append(f"연구사 공백: {gaps[0][:120]}")
+        parts.append(f"연구사 공백: {str(gaps[0])[:150]}")
+        if len(gaps) > 1:
+            parts.append(f"추가 공백: {str(gaps[1])[:120]}")
 
+    # ── 경고 ─────────────────────────────────────────────────────────────────
     if warnings:
         parts.append(f"⚠️ {len(warnings)}개 항목 원본 확인 필요")
 
@@ -414,15 +596,32 @@ def _format_voice_summary(analysis: dict, obsidian_result: str, ai_used: str) ->
     return "\n\n".join(parts)
 
 
+def _format_date_ko(date_str: str) -> str:
+    """
+    "1945-03-15" → "1945년 3월 15일"
+    "1945-03"    → "1945년 3월"
+    "1945"       → "1945년"
+    """
+    parts = date_str.split("-")
+    if len(parts) == 3:
+        return f"{parts[0]}년 {int(parts[1])}월 {int(parts[2])}일"
+    elif len(parts) == 2:
+        return f"{parts[0]}년 {int(parts[1])}월"
+    return f"{parts[0]}년"
+
+
 def _fallback_analysis(doc: ExtractedDocument, error_msg: str) -> dict:
     return {
         "title": doc.title,
         "authors": ["⚠️ 확인 필요"],
         "year": "⚠️ 확인 필요",
-        "journal": "⚠️ 확인 필요",
+        "document_date": doc.document_date,
+        "document_type": "other",
+        "journal_or_source": "⚠️ 확인 필요",
         "main_thesis": f"⚠️ AI 분석 실패 — 원본 확인 필요. 오류: {error_msg[:200]}",
         "key_arguments": [], "methodology": "⚠️ 확인 필요",
-        "primary_sources": [], "footnotes": [],
+        "primary_sources": [], "footnotes": [], "toc": [],
+        "key_events": [], "key_persons": [],
         "keywords": [], "related_works": [], "research_gaps": [],
         "liner_highlights": [],
         "uncertainty_notes": [f"AI 분석 오류: {error_msg[:300]}"],
@@ -467,7 +666,7 @@ def history_research_action(command: str, parameters: dict, player=None) -> str:
         return find_research_gaps()
 
     elif command == "generate_footnote":
-        fp = parameters.get("file_path", "")
+        fp   = parameters.get("file_path", "")
         page = int(parameters.get("page", 1))
         hint = parameters.get("quote_hint", "")
         return generate_footnote(fp, page, hint)
