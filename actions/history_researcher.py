@@ -101,6 +101,8 @@ def analyze_document(
         rg_str = f"RG {record_group}" if record_group else ""
         en_str = f"Entry {entry}" if entry else ""
         _log(f"아카이브 식별자: {' / '.join(filter(None, [rg_str, en_str]))}")
+    if doc.nikh_reference:
+        _log(f"국편 사료참조번호: {doc.nikh_reference}")
 
     # 2. Claude 분석 시도 → 실패 시 Gemini 폴백
     analysis, ai_used = _analyze_with_best_ai(doc, _log)
@@ -114,6 +116,11 @@ def analyze_document(
     archive_info = _build_archive_info(record_group, entry, box, folder)
     if archive_info:
         analysis["archive_info"] = archive_info
+
+    # 4b. 국사편찬위원회 사료참조번호 삽입 (파일명에서 자동 감지)
+    if doc.nikh_reference:
+        analysis["nikh_reference"] = doc.nikh_reference
+        analysis["nikh_ref_parsed"] = doc.nikh_ref_parsed
 
     # 5. Obsidian 저장
     obsidian_result = ""
@@ -509,6 +516,24 @@ def _format_voice_summary(analysis: dict, obsidian_result: str, ai_used: str) ->
         if archive_info.get("folder"):
             arc_parts.append(f"Folder: {archive_info['folder']}")
         parts.append(f"🏛️ NARA 출처: {' / '.join(arc_parts)}")
+
+    # ── 국사편찬위원회 사료참조번호 블록 ─────────────────────────────────────
+    nikh_ref    = analysis.get("nikh_reference", "")
+    nikh_parsed = analysis.get("nikh_ref_parsed", {})
+    if nikh_ref:
+        nikh_line = f"📚 국편 사료참조번호: {nikh_ref}"
+        detail_parts = []
+        if nikh_parsed.get("digitization_year"):
+            detail_parts.append(f"수집연도 {nikh_parsed['digitization_year']}년")
+        if nikh_parsed.get("collection"):
+            detail_parts.append(f"컬렉션 {int(nikh_parsed['collection']):03d}")
+        if nikh_parsed.get("document_no"):
+            detail_parts.append(f"문서 {int(nikh_parsed['document_no']):04d}")
+        if nikh_parsed.get("item_no"):
+            detail_parts.append(f"아이템 {int(nikh_parsed['item_no']):04d}")
+        if detail_parts:
+            nikh_line += f" ({', '.join(detail_parts)})"
+        parts.append(nikh_line)
 
     # ── 서지사항 블록 ────────────────────────────────────────────────────────
     bib_parts: list[str] = []

@@ -62,11 +62,19 @@ def save_research_note(analysis: dict, vault_path: Optional[Path] = None) -> str
     if not vault:
         return "❌ 옵시디안 볼트 경로가 설정되지 않았습니다. '옵시디안 볼트 경로 설정 [경로]' 명령을 사용하세요."
 
-    # NARA 자료는 별도 폴더에 저장
+    # 폴더 라우팅: NARA(RG) > 국편 AUS 파일 > 일반 논문
     archive_info = analysis.get("archive_info", {})
+    nikh_ref     = analysis.get("nikh_reference", "")
+    nikh_parsed  = analysis.get("nikh_ref_parsed", {})
+
     if archive_info.get("record_group"):
         rg_safe = re.sub(r'[\\/:*?"<>|\s]', "_", archive_info["record_group"])
         research_dir = vault / "역사학연구" / "미국자료" / rg_safe
+    elif nikh_ref:
+        # 국사편찬위원회 AUS 자료 → 미국자료/국편사료/ 하위
+        coll = nikh_parsed.get("collection", "")
+        coll_dir = f"컬렉션_{int(coll):03d}" if coll.isdigit() else "기타"
+        research_dir = vault / "역사학연구" / "미국자료" / "국편사료" / coll_dir
     else:
         research_dir = vault / "역사학연구" / "논문분석"
     research_dir.mkdir(parents=True, exist_ok=True)
@@ -74,14 +82,17 @@ def save_research_note(analysis: dict, vault_path: Optional[Path] = None) -> str
     title = analysis.get("title", "제목없음")
     safe_title = re.sub(r'[\\/:*?"<>|]', "_", title)
 
-    # NARA 자료는 파일명에 RG/Entry 포함
+    # 파일명 접두사 결정
     if archive_info.get("record_group"):
         rg = archive_info["record_group"].replace(" ", "")
         en = archive_info.get("entry", "").replace("Entry ", "E").replace(" ", "")
         prefix = f"{rg}_{en}_" if en else f"{rg}_"
-        note_path = research_dir / f"{prefix}{safe_title}.md"
+    elif nikh_ref:
+        # AUS 참조번호를 파일명 접두사로 사용
+        prefix = f"{nikh_ref}_"
     else:
-        note_path = research_dir / f"{safe_title}.md"
+        prefix = ""
+    note_path = research_dir / f"{prefix}{safe_title}.md"
 
     content = _build_research_note(analysis)
     note_path.write_text(content, encoding="utf-8")
@@ -97,6 +108,8 @@ def save_research_note(analysis: dict, vault_path: Optional[Path] = None) -> str
         if archive_info.get("entry"):
             archive_label += f" / {archive_info['entry']}"
         archive_label += "]"
+    elif nikh_ref:
+        archive_label = f" [국편 {nikh_ref}]"
 
     return (
         f"✅ 옵시디안 노트 저장 완료{archive_label}: {note_path}\n"
@@ -122,8 +135,10 @@ def _build_research_note(a: dict) -> str:
     classif     = a.get("classification", "")
     hist_period = a.get("historical_period", "")
     geo_scope   = a.get("geographical_scope", "")
-    source_file = a.get("file_path", "")
-    archive     = a.get("archive_info", {})
+    source_file  = a.get("file_path", "")
+    archive      = a.get("archive_info", {})
+    nikh_ref     = a.get("nikh_reference", "")
+    nikh_parsed  = a.get("nikh_ref_parsed", {})
 
     # ── YAML 프론트매터 ──────────────────────────────────────────────────────
     tags = ["역사학연구"]
@@ -135,6 +150,11 @@ def _build_research_note(a: dict) -> str:
         if archive.get("entry"):
             en_tag = archive["entry"].replace(" ", "_")
             tags.append(f"NARA/{rg_tag}/{en_tag}")
+    if nikh_ref:
+        tags.append("국사편찬위원회/미국자료")
+        coll = nikh_parsed.get("collection", "")
+        if coll:
+            tags.append(f"국사편찬위원회/컬렉션_{int(coll):03d}")
     tags += [f"키워드/{k}" for k in a.get("keywords", [])]
     tags += [f"저자/{au.replace(' ', '_')}" for au in a.get("authors", [])]
     tags_str = "\n".join(f"  - {t}" for t in tags)
@@ -145,6 +165,12 @@ def _build_research_note(a: dict) -> str:
         fm_extra += f"\ndocument_date: \"{doc_date}\""
     if doc_type:
         fm_extra += f"\ndocument_type: \"{doc_type}\""
+    if nikh_ref:
+        fm_extra += f"\nnikh_reference: \"{nikh_ref}\""
+        if nikh_parsed.get("digitization_year"):
+            fm_extra += f"\nnikh_year: \"{nikh_parsed['digitization_year']}\""
+        if nikh_parsed.get("collection"):
+            fm_extra += f"\nnikh_collection: \"{nikh_parsed['collection']}\""
     if archive.get("record_group"):
         fm_extra += f"\nrecord_group: \"{archive['record_group']}\""
     if archive.get("entry"):
@@ -198,6 +224,35 @@ def _build_research_note(a: dict) -> str:
         nara_cite = ", ".join(nara_cite_parts)
         if nara_cite:
             archive_section += f"\n**NARA 인용 형식**: `{nara_cite}, {archive.get('repository', 'NARA')}`\n"
+
+    # ── 국사편찬위원회 사료참조번호 섹션 ─────────────────────────────────────
+    nikh_section = ""
+    if nikh_ref:
+        nikh_section = "\n## 📚 국사편찬위원회 사료참조번호\n\n"
+        nikh_section += "| 항목 | 내용 |\n|------|------|\n"
+        nikh_section += f"| **사료참조번호** | `{nikh_ref}` |\n"
+        if nikh_parsed.get("digitization_year"):
+            nikh_section += f"| **수집연도** | {nikh_parsed['digitization_year']}년 |\n"
+        if nikh_parsed.get("collection"):
+            nikh_section += f"| **컬렉션번호** | {int(nikh_parsed['collection']):03d} |\n"
+        if nikh_parsed.get("document_no"):
+            nikh_section += f"| **문서번호** | {int(nikh_parsed['document_no']):04d} |\n"
+        if nikh_parsed.get("item_no"):
+            nikh_section += f"| **아이템번호** | {int(nikh_parsed['item_no']):04d} |\n"
+        if nikh_parsed.get("sub_no"):
+            nikh_section += f"| **세부번호** | {nikh_parsed['sub_no']} |\n"
+        nikh_section += "| **소장기관** | 국사편찬위원회 (NIKH) |\n"
+
+        # 국편 인용 형식
+        nikh_cite_parts = [nikh_ref]
+        if doc_date:
+            nikh_cite_parts.append(doc_date)
+        if title and title != "제목없음":
+            nikh_cite_parts.append(f'"{title}"')
+        nikh_section += f"\n**국편 인용 형식**: `{', '.join(nikh_cite_parts)}, 국사편찬위원회`\n"
+
+        # NIKH 검색 링크 힌트
+        nikh_section += f"\n> 💡 국사편찬위원회 한국사데이터베이스에서 `{nikh_ref}` 로 검색 가능합니다.\n"
 
     # ── 문서 메타 섹션 ───────────────────────────────────────────────────────
     meta_lines = []
@@ -297,7 +352,7 @@ tags:
 {meta_block}
 
 ---
-{archive_section}{toc_section}
+{archive_section}{nikh_section}{toc_section}
 ## 핵심 주장 (Main Thesis)
 
 {a.get("main_thesis", "_추출되지 않음_")}

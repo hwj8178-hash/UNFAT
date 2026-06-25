@@ -64,6 +64,10 @@ class ExtractedDocument:
     document_date: str = ""          # "1945-03-15" 형식 (미국 자료 등)
     document_language: str = ""      # "ko", "en", "ja", "zh", "mixed"
 
+    # v3: 국사편찬위원회 사료참조번호 (파일명 AUS* 자동 감지)
+    nikh_reference: str = ""         # 전체 참조번호 (예: "AUS2012_001_0001_0001")
+    nikh_ref_parsed: dict = field(default_factory=dict)  # 파싱된 구성요소
+
     # ── 기본 텍스트 프로퍼티 ──────────────────────────────────────────────────
 
     @property
@@ -275,7 +279,7 @@ def extract_document(file_path: str) -> ExtractedDocument:
 # ─── 후처리: 목차·날짜·언어 감지 ─────────────────────────────────────────────
 
 def _post_process(doc: ExtractedDocument) -> None:
-    """추출 완료 후 목차, 날짜, 언어를 감지합니다."""
+    """추출 완료 후 목차, 날짜, 언어, NIKH 참조번호를 감지합니다."""
     if not doc.pages:
         return
 
@@ -294,6 +298,80 @@ def _post_process(doc: ExtractedDocument) -> None:
         print(f"[DocExtract] 목차 감지: {len(toc)}개 항목")
     else:
         print("[DocExtract] 목차 미감지 — Claude가 구조 추론")
+
+    # 국사편찬위원회 AUS 사료참조번호 감지 (파일명 기준)
+    nikh_ref, nikh_parsed = _parse_nikh_reference(doc.file_path)
+    if nikh_ref:
+        doc.nikh_reference = nikh_ref
+        doc.nikh_ref_parsed = nikh_parsed
+        print(f"[DocExtract] 국편 사료참조번호 감지: {nikh_ref}")
+
+
+def _parse_nikh_reference(file_path: str) -> tuple[str, dict]:
+    """
+    파일명에서 국사편찬위원회 사료참조번호(AUS*)를 파싱합니다.
+
+    국편 미국자료 참조번호 형식 예시:
+      AUS2012_001_0001_0001   → 연도:2012, 컬렉션:001, 문서:0001, 페이지:0001
+      AUS20120010001000100001 → 같은 구조, 구분자 없는 버전
+      AUS_001_0001_0001       → 연도 없는 버전
+      AUS-59-1234-001         → 하이픈 구분자 버전
+
+    Returns:
+      (참조번호_문자열, 파싱_딕셔너리)
+      파일명이 AUS로 시작하지 않으면 ("", {}) 반환
+    """
+    stem = Path(file_path).stem  # 확장자 제외 파일명
+
+    # AUS로 시작하는지 확인 (대소문자 무관)
+    if not re.match(r'^AUS', stem, re.IGNORECASE):
+        return "", {}
+
+    ref = stem  # 전체 참조번호 = 파일명 (확장자 제외)
+    parsed: dict = {"raw": ref, "prefix": "AUS"}
+
+    # 구분자 정규화 (하이픈·언더스코어 → 언더스코어)
+    normalized = re.sub(r'[-_]+', '_', stem)
+    parts = normalized.split('_')
+
+    # 첫 번째 파트에서 "AUS" 제거
+    after_aus = parts[0][3:] if parts[0].upper().startswith('AUS') else ''
+    remaining = ([after_aus] if after_aus else []) + parts[1:]
+    # 빈 파트 제거
+    remaining = [p for p in remaining if p]
+
+    # ── 형식 1: AUS + 연도(4자리) + 나머지 ──────────────────────────────────
+    if remaining and re.match(r'^\d{4}$', remaining[0]):
+        parsed["digitization_year"] = remaining[0]
+        remaining = remaining[1:]
+
+    # ── 나머지 숫자 파트 순서대로 배정 ──────────────────────────────────────
+    # 국편 사료번호 구조: 컬렉션번호 → 문서번호 → 페이지/아이템번호
+    field_names = ["collection", "document_no", "item_no", "sub_no"]
+    for i, val in enumerate(remaining[:4]):
+        if re.match(r'^\d+$', val):
+            parsed[field_names[i]] = val
+        else:
+            # 숫자가 아닌 파트는 기타 정보로 저장
+            parsed.setdefault("extra", []).append(val)
+
+    return ref, parsed
+
+
+def _format_nikh_reference(ref: str, parsed: dict) -> str:
+    """국편 사료참조번호를 사람이 읽기 좋은 형식으로 변환합니다."""
+    if not ref:
+        return ""
+    parts = [f"참조번호: {ref}"]
+    if parsed.get("digitization_year"):
+        parts.append(f"수집연도: {parsed['digitization_year']}년")
+    if parsed.get("collection"):
+        parts.append(f"컬렉션: {int(parsed['collection']):03d}")
+    if parsed.get("document_no"):
+        parts.append(f"문서번호: {int(parsed['document_no']):04d}")
+    if parsed.get("item_no"):
+        parts.append(f"아이템: {int(parsed['item_no']):04d}")
+    return " | ".join(parts)
 
 
 def _detect_language(text: str) -> str:
