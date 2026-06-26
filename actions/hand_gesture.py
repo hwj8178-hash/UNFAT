@@ -34,17 +34,19 @@ import numpy as np
 # ─── 제스처 열거형 ──────────────────────────────────────────────────────────
 
 class Gesture(Enum):
-    NONE         = "대기"
-    FIST         = "주먹_클릭"
-    OPEN_HAND    = "손바닥_재생"
-    POINTER      = "검지_마우스이동"
-    PEACE        = "V사인_스크롤"
-    THUMBS_UP    = "엄지위_볼륨업"
-    THUMBS_DOWN  = "엄지아래_볼륨다운"
-    OK           = "OK_우클릭"
-    FOUR_FINGERS = "네손가락_캡처"
-    SWIPE_LEFT   = "스와이프왼쪽_뒤로"
-    SWIPE_RIGHT  = "스와이프오른쪽_앞으로"
+    NONE          = "대기"
+    FIST          = "주먹_클릭"
+    OPEN_HAND     = "손바닥_재생"
+    POINTER       = "검지_마우스이동"
+    PEACE         = "V사인_스크롤"
+    THUMBS_UP     = "엄지위_볼륨업"
+    THUMBS_DOWN   = "엄지아래_볼륨다운"
+    OK            = "OK_우클릭"
+    FOUR_FINGERS  = "네손가락_캡처"
+    SWIPE_LEFT    = "스와이프왼쪽_뒤로"
+    SWIPE_RIGHT   = "스와이프오른쪽_앞으로"
+    SCROLL_DOWN   = "세손가락_스크롤다운"   # 검지+중지+약지 → 아래 스크롤
+    ZOOM          = "핀치_확대축소"          # 엄지+검지 간격 → 화면 줌
 
 
 # 화면 표시용 라벨
@@ -53,13 +55,15 @@ GESTURE_LABEL = {
     Gesture.FIST:         "✊ 클릭",
     Gesture.OPEN_HAND:    "✋ 재생/정지",
     Gesture.POINTER:      "☝ 마우스 이동",
-    Gesture.PEACE:        "✌ 스크롤",
+    Gesture.PEACE:        "✌ 스크롤 (상하)",
     Gesture.THUMBS_UP:    "👍 볼륨 +",
     Gesture.THUMBS_DOWN:  "👎 볼륨 -",
     Gesture.OK:           "👌 우클릭",
     Gesture.FOUR_FINGERS: "🖐 화면 캡처",
     Gesture.SWIPE_LEFT:   "← 뒤로",
     Gesture.SWIPE_RIGHT:  "→ 앞으로",
+    Gesture.SCROLL_DOWN:  "↓↓↓ 스크롤 다운",
+    Gesture.ZOOM:         "🔍 확대/축소",
 }
 
 # 제스처별 최소 실행 간격 (ms) — 너무 빠른 반복 방지
@@ -72,6 +76,7 @@ DEBOUNCE_MS: dict[Gesture, int] = {
     Gesture.FOUR_FINGERS: 2500,
     Gesture.SWIPE_LEFT:   900,
     Gesture.SWIPE_RIGHT:  900,
+    Gesture.SCROLL_DOWN:  80,   # 연속 스크롤 — 80ms 간격
 }
 
 # 손가락 랜드마크 인덱스 (MediaPipe)
@@ -112,6 +117,9 @@ class HandGestureController:
 
         # 스크롤 기준 y좌표
         self._scroll_ref: Optional[float] = None
+
+        # 줌 기준 거리 (엄지-검지 간격)
+        self._zoom_ref: Optional[float] = None
 
         # 제스처 디바운싱 — {Gesture: last_triggered_ms}
         self._last_ts: dict[Gesture, float] = {}
@@ -234,6 +242,7 @@ class HandGestureController:
                     self.current_gesture = Gesture.NONE
                     self.current_fingers = [False] * 5
                     self._scroll_ref = None
+                    self._zoom_ref   = None
                     self._mx = self._my = None
 
                 if self.show_preview:
@@ -307,10 +316,18 @@ class HandGestureController:
         if f == [False, True, True, True, True]:
             return Gesture.FOUR_FINGERS
 
+        # 세 손가락 (검지+중지+약지, 소지·엄지 접음) → 스크롤 다운
+        if f == [False, True, True, True, False]:
+            return Gesture.SCROLL_DOWN
+
         # OK 사인: 엄지+검지 끝이 가깝고 나머지 펴짐
         dist = np.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y)
         if dist < 0.055 and f[2] and f[3] and f[4]:
             return Gesture.OK
+
+        # 핀치/스프레드: 엄지+검지만 펴고 나머지 접음 → 줌
+        if f[0] and f[1] and not f[2] and not f[3] and not f[4]:
+            return Gesture.ZOOM
 
         return Gesture.NONE
 
@@ -380,6 +397,32 @@ class HandGestureController:
             if now_ms - self._last_ts.get(gesture, 0) > DEBOUNCE_MS[gesture]:
                 self._last_ts[gesture] = now_ms
                 self._volume(-2)
+            return
+
+        # 세 손가락 → 스크롤 다운 (연속, 80ms 간격)
+        if gesture == Gesture.SCROLL_DOWN:
+            if now_ms - self._last_ts.get(gesture, 0) > DEBOUNCE_MS[gesture]:
+                self._last_ts[gesture] = now_ms
+                pyautogui.scroll(-3, _pause=False)
+            return
+
+        # 핀치/스프레드 → 줌 인/아웃 (Ctrl + 마우스 휠)
+        if gesture == Gesture.ZOOM:
+            dist = float(np.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y))
+            if self._zoom_ref is None:
+                self._zoom_ref = dist
+                return
+            delta = dist - self._zoom_ref          # 양수=벌림=줌인, 음수=좁힘=줌아웃
+            ticks = int(delta * 40)                # 감도 계수
+            if abs(ticks) >= 1:
+                try:
+                    import pyautogui as _pag
+                    _pag.keyDown('ctrl')
+                    _pag.scroll(ticks, _pause=False)
+                    _pag.keyUp('ctrl')
+                except Exception:
+                    pass
+            self._zoom_ref = dist
             return
 
         # ── 단발 동작 (디바운싱 적용) ────────────────────────────────────────
@@ -483,6 +526,8 @@ class HandGestureController:
             "☝  =  Mouse",
             "✊  =  Click",
             "✌  =  Scroll",
+            "3fingers = ScrollDn",
+            "T+1 = Zoom",
             "👌  =  R-Click",
             "👍  =  Vol+",
             "👎  =  Vol-",

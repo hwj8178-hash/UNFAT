@@ -8,8 +8,9 @@ import re
 import sys
 from pathlib import Path
 
-_BASE       = Path(__file__).resolve().parent.parent
-_JOKES_PATH = _BASE / "memory" / "dad_jokes.json"
+_BASE          = Path(__file__).resolve().parent.parent
+_JOKES_PATH    = _BASE / "memory" / "dad_jokes.json"
+_SETTINGS_PATH = _BASE / "memory" / "dad_jokes_settings.json"
 
 _BUILTIN: list[str] = [
     "세상에서 가장 빠른 닭이 뭔지 알아요? 후다닥!",
@@ -45,6 +46,33 @@ def load_jokes() -> list[str]:
         except Exception:
             pass
     return _BUILTIN.copy()
+
+
+def is_jokes_enabled() -> bool:
+    """아재개그 모드가 켜져 있는지 반환합니다 (기본값: True)."""
+    try:
+        data = json.loads(_SETTINGS_PATH.read_text("utf-8"))
+        return bool(data.get("enabled", True))
+    except Exception:
+        return True
+
+
+def set_jokes_enabled(state: bool) -> str:
+    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _SETTINGS_PATH.write_text(
+        json.dumps({"enabled": state}, ensure_ascii=False), "utf-8"
+    )
+    return "켜짐" if state else "꺼짐"
+
+
+def toggle_jokes() -> str:
+    """아재개그 모드를 토글하고 새 상태 메시지를 반환합니다."""
+    new_state = not is_jokes_enabled()
+    label = set_jokes_enabled(new_state)
+    if new_state:
+        return f"아재개그 모드가 {label}으로 전환되었습니다. 이제 일어날 때마다 개그를 칩니다!"
+    else:
+        return f"아재개그 모드가 {label}으로 전환되었습니다. 조용히 일어나겠습니다."
 
 
 def save_jokes(jokes: list[str]) -> None:

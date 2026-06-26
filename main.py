@@ -38,7 +38,12 @@ from actions.obsidian_bridge   import set_vault_path, analyze_research_landscape
 from actions.hand_gesture      import hand_gesture_control
 from actions.voice_enrollment  import enroll_voice as _enroll_voice_fn
 from core.claude_client        import is_claude_available as _check_claude
-from actions.dad_jokes_manager import load_jokes as _load_dad_jokes, fetch_and_update_jokes as _fetch_dad_jokes
+from actions.dad_jokes_manager import (
+    load_jokes           as _load_dad_jokes,
+    fetch_and_update_jokes as _fetch_dad_jokes,
+    is_jokes_enabled     as _jokes_enabled,
+    toggle_jokes         as _toggle_jokes,
+)
 from memory.conversation_log   import (
     append_turn      as _log_turn,
     get_recent_context as _get_conv_ctx,
@@ -752,6 +757,25 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "toggle_dad_jokes",
+        "description": (
+            "웨이크업 시 아재개그 모드를 켜거나 끕니다. "
+            "'아재개그 꺼줘', '개그 좀 그만해', '아재개그 끄기', '조용히 일어나줘' → 끄기. "
+            "'아재개그 켜줘', '개그 다시 해줘', '아재개그 모드 켜기' → 켜기. "
+            "'아재개그 모드 전환', '개그 온오프' → 현재 상태 반전 (토글)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "enabled": {
+                    "type": "BOOLEAN",
+                    "description": "true=켜기, false=끄기. 생략 시 현재 상태 반전(토글)."
+                }
+            },
+            "required": []
+        }
+    },
+    {
         "name": "update_dad_jokes",
         "description": (
             "웹을 검색하여 새로운 아재개그를 수집하고 목록을 업데이트합니다. "
@@ -1070,27 +1094,31 @@ class AssistantLive:
     _joke_index = 0  # 클래스 공유 카운터 (순환)
 
     def _on_wake_word(self):
-        """웨이크워드 감지 콜백 — 아재개그와 함께 활기차게 일어납니다."""
+        """웨이크워드 감지 콜백 — 아재개그(모드 ON일 때)와 함께 활기차게 일어납니다."""
         if not self.ui.muted:
             return
         self.ui.wake_up()
-        jokes = _load_dad_jokes()
-        joke  = jokes[self.__class__._joke_index % len(jokes)]
-        self.__class__._joke_index += 1
+
+        if _jokes_enabled():
+            jokes = _load_dad_jokes()
+            joke  = jokes[self.__class__._joke_index % len(jokes)]
+            self.__class__._joke_index += 1
+            greet_text = (
+                f"웨이크워드로 활성화됐습니다. "
+                f"원준씨에게 아재개그를 한 개 말하면서 활기차게 일어나세요. "
+                f"오늘의 아재개그: '{joke}' "
+                f"아재개그를 먼저 말하고, 짧게 준비됐다고 덧붙이세요."
+            )
+        else:
+            greet_text = "웨이크워드로 활성화됐습니다. 원준씨에게 준비됐다고 짧게 인사하세요."
+
         def _greet():
             import time
             time.sleep(0.5)
             if self._loop and self.session:
                 asyncio.run_coroutine_threadsafe(
                     self.session.send_client_content(
-                        turns={"parts": [{
-                            "text": (
-                                f"웨이크워드로 활성화됐습니다. "
-                                f"원준씨에게 아재개그를 한 개 말하면서 활기차게 일어나세요. "
-                                f"오늘의 아재개그: '{joke}' "
-                                f"아재개그를 먼저 말하고, 짧게 준비됐다고 덧붙이세요."
-                            )
-                        }]},
+                        turns={"parts": [{"text": greet_text}]},
                         turn_complete=True,
                     ),
                     self._loop,
@@ -1412,6 +1440,16 @@ class AssistantLive:
                 # 웨이크워드 감지기에 새 프로필 즉시 반영
                 if self._wake_detector:
                     self._wake_detector.reload_profile()
+
+            elif name == "toggle_dad_jokes":
+                from actions.dad_jokes_manager import set_jokes_enabled
+                enabled_arg = args.get("enabled", None)
+                if enabled_arg is None:
+                    result = _toggle_jokes()
+                else:
+                    label  = set_jokes_enabled(bool(enabled_arg))
+                    result = f"아재개그 모드가 {label}으로 설정되었습니다."
+                self.ui.write_log(f"SYS: {result}")
 
             elif name == "update_dad_jokes":
                 count = max(10, min(100, int(args.get("count", 30))))
