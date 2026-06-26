@@ -11,6 +11,11 @@
 sounddevice
 SpeechRecognition
 
+# 한국어 음성 인식 (faster-whisper — 로컬 오프라인, 고정밀)
+# Google Speech API보다 한국어 정확도 대폭 향상, 인터넷 불필요
+# 첫 실행 시 모델 다운로드 (~39MB for tiny, ~244MB for small)
+faster-whisper
+
 # ── Google AI ─────────────────────────────────────────────────────────────────
 google-genai
 google-generativeai

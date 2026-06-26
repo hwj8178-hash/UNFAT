@@ -871,22 +871,27 @@ class WakeWordDetector:
 
     def _loop(self):
         import time
-        try:
-            import speech_recognition as sr
-        except ImportError:
-            print("[WONJUNS] ⚠️  SpeechRecognition 미설치 — 웨이크워드 비활성")
-            print("[WONJUNS]    설치: pip install SpeechRecognition")
-            return
+        from core.stt_engine import transcribe_korean, is_faster_whisper_available
 
-        rec = sr.Recognizer()
-        rec.energy_threshold         = 400
-        rec.dynamic_energy_threshold = False
+        # STT 엔진 상태 출력
+        if is_faster_whisper_available():
+            print("[WONJUNS] 🎙️ 웨이크워드 엔진: faster-whisper (오프라인 한국어 고정밀)")
+        else:
+            # faster-whisper 없으면 Google Speech API 폴백
+            try:
+                import speech_recognition  # noqa
+                print("[WONJUNS] 🎙️ 웨이크워드 엔진: Google Speech API (pip install faster-whisper 권장)")
+            except ImportError:
+                print("[WONJUNS] ⚠️  STT 엔진 없음 — 웨이크워드 비활성")
+                print("[WONJUNS]    설치: pip install faster-whisper")
+                return
 
-        WINDOW = self._rate * 3 * 2   # 3초 @ 16kHz int16(2바이트)
-        acc = b""
+        WINDOW = self._rate * 4 * 2  # 4초 윈도우 @ 16kHz int16 (기존 3초 → 향상)
+        POLL   = 0.08                # 80ms 폴링 (기존 400ms → 5배 단축)
+        acc    = b""
 
         while self._active:
-            time.sleep(0.4)
+            time.sleep(POLL)
 
             chunks: list[bytes] = []
             try:
@@ -902,37 +907,32 @@ class WakeWordDetector:
             if len(acc) > WINDOW * 2:
                 acc = acc[-WINDOW:]
 
-            if len(acc) < WINDOW // 3:
+            # 최소 1초 이상 누적돼야 인식 시작
+            if len(acc) < self._rate * 2:
                 continue
 
             now = time.time()
             if now < self._cooldown:
                 continue
 
-            audio = sr.AudioData(acc[-WINDOW:], self._rate, 2)
+            # ── 한국어 웨이크워드 인식 (Korean-first) ────────────────────────
+            result = transcribe_korean(acc[-WINDOW:], self._rate)
+
+            if not result:
+                continue
+
+            detected_text   = result.text
             phrase_detected = False
-            detected_text   = ""
 
-            # ① 영어 인식 시도
-            try:
-                en_text = rec.recognize_google(audio, language="en-US").lower()
-                if any(p in en_text for p in self._EN_PHRASES):
-                    phrase_detected = True
-                    detected_text   = en_text
-                    print(f"[WONJUNS] 🎤 영어 웨이크워드 감지: '{en_text}'")
-            except Exception:
-                pass
+            # ① 한국어 문구 확인 (우선)
+            if any(p in detected_text for p in self._KO_PHRASES):
+                phrase_detected = True
+                print(f"[WONJUNS] 🎤 한국어 웨이크워드 감지: '{detected_text}' [{result.engine}]")
 
-            # ② 한국어 인식 시도 (영어 미감지 시)
-            if not phrase_detected:
-                try:
-                    ko_text = rec.recognize_google(audio, language="ko-KR").lower()
-                    if any(p in ko_text for p in self._KO_PHRASES):
-                        phrase_detected = True
-                        detected_text   = ko_text
-                        print(f"[WONJUNS] 🎤 한국어 웨이크워드 감지: '{ko_text}'")
-                except Exception:
-                    pass   # 무음·인식 실패 — 조용히 무시
+            # ② 영어 문구 확인 (보조)
+            if not phrase_detected and any(p in detected_text for p in self._EN_PHRASES):
+                phrase_detected = True
+                print(f"[WONJUNS] 🎤 영어 웨이크워드 감지: '{detected_text}' [{result.engine}]")
 
             if phrase_detected:
                 # ③ 화자 인증 — 등록된 프로필이 있을 때만 검사
@@ -1061,13 +1061,38 @@ class AssistantLive:
             parts.append(knowledge_ctx)
         parts.append(sys_prompt)
 
-        # 한국어 전사 언어 코드 설정
+        # ── 한국어 음성 인식 최적화 지시 ─────────────────────────────────────
+        ko_speech_hint = (
+            "\n[음성 인식 설정]\n"
+            "사용자의 모국어는 한국어입니다.\n"
+            "• 발화가 불명확하거나 잡음이 있어도 한국어로 최대한 해석하세요.\n"
+            "• 한국어 구어체를 자연스럽게 이해합니다: 반말/존댓말 혼용, 축약형(어떡게→어떻게), 연음, 필러('어', '음', '그', '저').\n"
+            "• 필러 단어는 의도 파악 후 무시합니다.\n"
+            "• 영어 단어가 섞인 한국어 발화도 그대로 처리합니다.\n"
+        )
+        parts.append(ko_speech_hint)
+
+        # ── 한국어 전사 언어 코드 설정 ────────────────────────────────────────
         try:
             transcription_cfg = types.AudioTranscriptionConfig(language_code="ko-KR")
         except Exception:
             transcription_cfg = {}
 
-        return types.LiveConnectConfig(
+        # ── VAD 감도 설정 (한국어: 끊김 없이 말하는 경향 반영) ───────────────
+        try:
+            realtime_cfg = types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=False,
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                    prefix_padding_ms=300,
+                    silence_duration_ms=800,  # 한국어 발화 사이 쉬는 시간 반영
+                )
+            )
+        except Exception:
+            realtime_cfg = None
+
+        config_kwargs = dict(
             response_modalities=["AUDIO"],
             output_audio_transcription=transcription_cfg,
             input_audio_transcription=transcription_cfg,
@@ -1082,6 +1107,10 @@ class AssistantLive:
                 )
             ),
         )
+        if realtime_cfg is not None:
+            config_kwargs["realtime_input_config"] = realtime_cfg
+
+        return types.LiveConnectConfig(**config_kwargs)
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
@@ -1522,6 +1551,13 @@ class AssistantLive:
 
     async def run(self):
         self._loop = asyncio.get_event_loop()
+
+        # STT 엔진 사전 로드 (첫 웨이크워드 지연 방지)
+        try:
+            from core.stt_engine import preload_whisper_model
+            await asyncio.get_event_loop().run_in_executor(None, preload_whisper_model)
+        except Exception:
+            pass
 
         # 웨이크워드 감지기 — 최초 1회 생성
         if self._wake_detector is None:
