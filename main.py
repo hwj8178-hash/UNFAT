@@ -798,6 +798,7 @@ class WakeWordDetector:
         self._voice_profile     = None   # np.ndarray or None
         self._encoder           = None   # resemblyzer VoiceEncoder (lazy)
         self._verify_threshold  = 0.80
+        self._enroll_q: _queue.Queue | None = None  # 목소리 등록 중 오디오 수집용
         self._load_voice_profile()
         threading.Thread(
             target=self._loop, daemon=True, name="wake-detector"
@@ -865,6 +866,31 @@ class WakeWordDetector:
             self._q.put_nowait(pcm_bytes)
         except _queue.Full:
             pass
+        # 등록 모드일 때 별도 큐에도 공급 (sd.rec() 충돌 방지)
+        if self._enroll_q is not None:
+            try:
+                self._enroll_q.put_nowait(pcm_bytes)
+            except _queue.Full:
+                pass
+
+    def capture_pcm(self, seconds: float) -> bytes:
+        """
+        기존 마이크 스트림(sd.InputStream)에서 N초 분량의 PCM(int16)을 수집합니다.
+        sd.rec()를 별도로 열지 않으므로 스트림 충돌이 없습니다.
+        """
+        import time
+        needed = int(self._rate * seconds * 2)  # int16 = 2 bytes/sample
+        self._enroll_q = _queue.Queue(maxsize=4000)
+        buf = b""
+        deadline = time.time() + seconds + 2.0  # 2초 여유
+        while len(buf) < needed and time.time() < deadline:
+            try:
+                chunk = self._enroll_q.get(timeout=0.1)
+                buf += chunk
+            except _queue.Empty:
+                pass
+        self._enroll_q = None
+        return buf[:needed]
 
     def stop(self):
         self._active = False
@@ -1315,12 +1341,14 @@ class AssistantLive:
                 self.ui.write_log(f"SYS: 목소리 등록 시작 — {n_samples}개 샘플")
                 ui_ref   = self.ui
                 speak_fn = self.speak
+                wake_ref = self._wake_detector  # capture_pcm 전달 (sd.rec() 충돌 방지)
                 r = await loop.run_in_executor(
                     None,
                     lambda: _enroll_voice_fn(
                         n_samples=n_samples,
                         player=ui_ref,
                         speak_fn=speak_fn,
+                        record_fn=wake_ref.capture_pcm if wake_ref else None,
                     )
                 )
                 result = r or "목소리 등록이 완료되었습니다."

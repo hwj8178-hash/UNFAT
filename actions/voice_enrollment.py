@@ -70,6 +70,7 @@ def enroll_voice(
     n_samples: int = ENROLL_SAMPLES,
     player=None,
     speak_fn=None,
+    record_fn=None,
 ) -> str:
     """
     사용자 목소리를 n_samples개 녹음하여 프로필(d-vector 평균)을 저장합니다.
@@ -78,15 +79,22 @@ def enroll_voice(
         n_samples: 녹음할 샘플 수 (기본 5, 권장 3~10)
         player:    UI 객체 (write_log 메서드 지원 시 로그 출력)
         speak_fn:  음성 출력 함수 (Gemini speak 등)
+        record_fn: callable(seconds: float) -> bytes (PCM int16 mono).
+                   제공 시 sd.rec() 대신 사용 — 기존 마이크 스트림 재사용으로 충돌 방지.
 
     Returns:
         결과 메시지 문자열
     """
     try:
-        import sounddevice as sd
         from resemblyzer import VoiceEncoder, preprocess_wav
     except ImportError as e:
-        return f"필수 패키지 미설치: {e} — pip install resemblyzer sounddevice"
+        return f"필수 패키지 미설치: {e} — pip install resemblyzer"
+
+    if record_fn is None:
+        try:
+            import sounddevice as sd
+        except ImportError as e:
+            return f"필수 패키지 미설치: {e} — pip install sounddevice"
 
     def _log(msg: str):
         print(f"[VoiceEnroll] {msg}")
@@ -109,19 +117,26 @@ def enroll_voice(
 
     for i in range(n_samples):
         _speak(f"{i + 1}번. 지금 말씀하세요.")
-        time.sleep(0.4)
+        time.sleep(1.2)  # Gemini 음성 출력 대기 후 녹음 시작
         _log(f"샘플 {i + 1}/{n_samples} — {RECORD_SECONDS}초 녹음 중...")
 
-        recording = sd.rec(
-            int(RECORD_SECONDS * SAMPLE_RATE),
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-        )
-        sd.wait()
+        if record_fn is not None:
+            # 기존 마이크 스트림에서 수집 (sd.rec() 충돌 방지)
+            pcm_bytes = record_fn(RECORD_SECONDS)
+            recording_flat = np.frombuffer(pcm_bytes, dtype=np.int16)
+        else:
+            recording = sd.rec(
+                int(RECORD_SECONDS * SAMPLE_RATE),
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            recording_flat = recording.flatten()
+
         time.sleep(0.3)
 
-        wav = recording.flatten().astype(np.float32) / 32768.0
+        wav = recording_flat.astype(np.float32) / 32768.0
         try:
             wav_proc = preprocess_wav(wav, source_sr=SAMPLE_RATE)
             emb = encoder.embed_utterance(wav_proc)
