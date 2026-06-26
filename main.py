@@ -38,6 +38,14 @@ from actions.obsidian_bridge   import set_vault_path, analyze_research_landscape
 from actions.hand_gesture      import hand_gesture_control
 from actions.voice_enrollment  import enroll_voice as _enroll_voice_fn
 from core.claude_client        import is_claude_available as _check_claude
+from actions.dad_jokes_manager import load_jokes as _load_dad_jokes, fetch_and_update_jokes as _fetch_dad_jokes
+from memory.conversation_log   import (
+    append_turn      as _log_turn,
+    get_recent_context as _get_conv_ctx,
+    get_learned_patterns_context as _get_patterns_ctx,
+    record_correction as _record_correction,
+    is_correction     as _is_correction,
+)
 
 
 def get_base_dir():
@@ -743,6 +751,24 @@ TOOL_DECLARATIONS = [
             "required": ["category", "key", "value"]
         }
     },
+    {
+        "name": "update_dad_jokes",
+        "description": (
+            "웹을 검색하여 새로운 아재개그를 수집하고 목록을 업데이트합니다. "
+            "'아재개그 업데이트해줘', '새로운 아재개그 추가해줘', '개그 목록 갱신해줘', "
+            "'아재개그 더 찾아와줘', '웃음 보충해줘' 등의 발화에 즉시 호출하세요."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "count": {
+                    "type": "INTEGER",
+                    "description": "수집할 아재개그 수 (기본값: 30, 최소 10, 최대 100)"
+                }
+            },
+            "required": []
+        }
+    },
 ]
 
 # --- Wake word detector ---
@@ -990,6 +1016,8 @@ class AssistantLive:
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._wake_detector: WakeWordDetector | None = None
+        self._abort_flag    = threading.Event()   # "그만해"/"닥쳐" 중단 신호
+        self._last_assistant_text = ""            # 교정 감지용 직전 응답 캐시
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -1039,37 +1067,15 @@ class AssistantLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"원준씨, {tool_name} 실행 중 오류가 발생했습니다. {short}")
 
-    # 웨이크업 시 아재개그 목록
-    _DAD_JOKES = [
-        "세상에서 가장 빠른 닭이 뭔지 알아요? 후다닥!",
-        "곰이 물에 빠지면 뭐가 될까요? 곰탕이요!",
-        "자전거가 왜 넘어졌을까요? 두발자전거라서요!",
-        "달력이 왜 슬플까요? 날이 가니까요!",
-        "빵집에서 빵이 다 팔리면 뭐라고 할까요? 빵구났다!",
-        "세상에서 제일 무거운 게 뭔지 알아요? 눈꺼풀이요. 눈이 무겁거든요!",
-        "왜 수학책은 항상 우울할까요? 문제가 너무 많아서요!",
-        "지구가 둥근 이유가 뭔지 알아요? 모난 데가 없어서요!",
-        "슬픈 초콜릿은 뭘까요? 다크 초콜릿이요!",
-        "피자가 결혼했어요. 잘 됐나요? 화덕에서 맺어졌으니 금실이 좋죠!",
-        "가장 빨리 배우는 사람은요? 배달부요!",
-        "왜 개미는 일을 열심히 할까요? 개미하니까요!",
-        "세상에서 가장 긴 다리는요? 다리미요!",
-        "냉장고가 웃으면 어떻게 될까요? 냉소적이 되죠!",
-        "소가 웃으면 뭐가 될까요? 웃소요!",
-        "왜 핸드폰은 떨어지면 안 될까요? 핸드폰이니까요!",
-        "세상에서 가장 짧은 사람은? 단발머리요!",
-        "왜 바나나는 외롭지 않을까요? 항상 한 다발이니까요!",
-        "거북이가 넘어지면 뭐라고 할까요? 터틀링이요!",
-        "가장 게으른 산은? 누워있는 산이요, 즉 누산이죠!",
-    ]
-    _joke_index = 0
+    _joke_index = 0  # 클래스 공유 카운터 (순환)
 
     def _on_wake_word(self):
-        """웨이크워드 감지 콜백 — 뮤트 해제 후 아재개그와 함께 인사."""
+        """웨이크워드 감지 콜백 — 아재개그와 함께 활기차게 일어납니다."""
         if not self.ui.muted:
             return
         self.ui.wake_up()
-        joke = self.__class__._DAD_JOKES[self.__class__._joke_index % len(self.__class__._DAD_JOKES)]
+        jokes = _load_dad_jokes()
+        joke  = jokes[self.__class__._joke_index % len(jokes)]
         self.__class__._joke_index += 1
         def _greet():
             import time
@@ -1112,9 +1118,17 @@ class AssistantLive:
         except Exception:
             knowledge_ctx = ""
 
+        # 세션 간 대화 이력 + 교정 패턴
+        conv_ctx     = _get_conv_ctx(n=20)
+        patterns_ctx = _get_patterns_ctx()
+
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
+        if conv_ctx:
+            parts.append(conv_ctx)
+        if patterns_ctx:
+            parts.append(patterns_ctx)
         if knowledge_ctx:
             parts.append(knowledge_ctx)
         parts.append(sys_prompt)
@@ -1193,6 +1207,17 @@ class AssistantLive:
 
         loop   = asyncio.get_event_loop()
         result = "Done."
+
+        # 중단 플래그 확인 (도구 실행 전)
+        if self._abort_flag.is_set():
+            self._abort_flag.clear()
+            print(f"[WONJUNS] 🛑 도구 '{name}' 실행 전 중단 요청으로 취소")
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": "작업이 취소되었습니다."}
+            )
 
         try:
             if name == "open_app":
@@ -1388,6 +1413,18 @@ class AssistantLive:
                 if self._wake_detector:
                     self._wake_detector.reload_profile()
 
+            elif name == "update_dad_jokes":
+                count = max(10, min(100, int(args.get("count", 30))))
+                self.ui.write_log(f"SYS: 아재개그 웹 업데이트 — {count}개 수집 중...")
+                r = await loop.run_in_executor(
+                    None, lambda: _fetch_dad_jokes(n=count)
+                )
+                ok, msg = r
+                result  = msg
+                # 업데이트 후 카운터 리셋 → 새 개그부터 시작
+                if ok:
+                    self.__class__._joke_index = 0
+
             elif name == "shutdown_assistant":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("알겠습니다, 원준씨. 종료합니다.")
@@ -1491,17 +1528,39 @@ class AssistantLive:
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                # 대화 기록 저장
+                                asyncio.get_event_loop().run_in_executor(
+                                    None, lambda t=full_in: _log_turn("user", t)
+                                )
+                                # 중단 명령 감지: "그만해", "닥쳐", "멈춰" 등
+                                _STOP_WORDS = {"그만해", "닥쳐", "멈춰", "중단해", "그만", "스탑",
+                                               "stop", "취소해", "취소", "그만둬", "하지마", "하지마세요"}
+                                if any(w in full_in for w in _STOP_WORDS):
+                                    self._abort_flag.set()
+                                    print(f"[WONJUNS] 🛑 중단 명령 감지: '{full_in}'")
+                                # 교정 표현 감지 → 패턴 기록
+                                elif _is_correction(full_in) and self._last_assistant_text:
+                                    asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        lambda u=full_in, a=self._last_assistant_text:
+                                            _record_correction(u, a)
+                                    )
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"Wonjuns: {full_out}")
+                                self._last_assistant_text = full_out
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "assistant",
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                                # 대화 기록 저장
+                                asyncio.get_event_loop().run_in_executor(
+                                    None, lambda t=full_out: _log_turn("assistant", t)
+                                )
                             out_buf = []
 
                     if response.tool_call:
